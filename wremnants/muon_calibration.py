@@ -507,7 +507,8 @@ def make_jpsi_crctn_helper(filepath):
             3, 0, 3, underflow=False, overflow=False, name="param"
         )
         hist_comb = hist.Hist(*A.axes, axis_param, storage=hist.storage.Double())
-        hist_comb.view()[...] = np.stack([x.values() for x in [A, e, M]], axis=-1)
+        # hist_comb.view()[...] = np.stack([x.values() for x in [A, e, M]], axis=-1)
+        hist_comb.view()[...] = 0 #maybe just values if variances actually matters for this hist
 
     hist_comb_cpp = narf.hist_to_pyroot_boost(hist_comb, tensor_rank=1)
     jpsi_crctn_helper = ROOT.wrem.JpsiCorrectionsRVecHelper[
@@ -553,6 +554,9 @@ def make_jpsi_crctn_unc_helper(
         raise ValueError(
             "Covariance matrix is not consistent with parameter uncertainties or parameters are not in the expected order."
         )
+
+    #redefine things to manually hack in prefit uncertainties instead of results from jpsi fit
+    cov = np.diag(np.tile([1e-3, 1e-2, 1e-4, 1], neta))**2 #dummy 1 at the end because nparmscov=4 for some reason
 
     cov = np.reshape(cov, (neta, nparmscov, neta, nparmscov))
     cov = cov[:, :n_scale_params, :, :n_scale_params]
