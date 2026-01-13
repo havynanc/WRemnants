@@ -4,9 +4,9 @@ import hist
 import numpy as np
 
 from utilities import common
-from utilities.io_tools import input_tools, output_tools
+from utilities.io_tools import input_tools
 from wums import boostHistHelpers as hh
-from wums import logging
+from wums import logging, output_tools
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -247,10 +247,10 @@ for name, corr_dict in corrh.items():
     outname = name.replace("-", "")
     if args.postfix:
         outname += f"_{args.postfix}"
-    outfile = f"{args.outpath}/{outname}"
+    outfile = f"{args.outpath}/{outname}Corr{args.proc}.pkl.lz4"
 
     if "Zmumu" in corr_dict:
-        output_tools.write_theory_corr_hist(
+        output_tools.write_lz4_pkl_output(
             outfile,
             "Z",
             {
@@ -258,7 +258,8 @@ for name, corr_dict in corrh.items():
                 f"{outname}_num": corr_dict["Zmumu"]["num"],
                 f"{outname}_den": corr_dict["Zmumu"]["den"],
             },
-            args,
+            basedir=".",
+            args=args,
         )
 
     if "Wplusmunu" in corr_dict and "Wminusmunu" in corr_dict:
@@ -267,7 +268,7 @@ for name, corr_dict in corrh.items():
             corr_dict["W"][key] = (
                 corr_dict["Wplusmunu"][key] + corr_dict["Wminusmunu"][key]
             )
-        output_tools.write_theory_corr_hist(
+        output_tools.write_lz4_pkl_output(
             outfile,
             "W",
             {

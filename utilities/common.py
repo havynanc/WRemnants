@@ -17,6 +17,20 @@ xsec_WminusJetsToMuNu = 8703.87
 xsec_DYJetsToMuMuMass10to50 = 6997.0
 Z_TAU_TO_LEP_RATIO = 1.0 - (1.0 - BR_TAUToMU - BR_TAUToE) ** 2
 
+# ------------------------------------
+# GenXsecAnalyzer:
+# ------------------------------------
+# Before Filter: total cross section = 3.653e+02 +- 1.572e-02 pb
+# Filter efficiency (taking into account weights)= (1.98515e+06) / (1.29071e+08) = 1.538e-02 +- 1.083e-05
+# Filter efficiency (event-level)= (1.98515e+06) / (1.29071e+08) = 1.538e-02 +- 1.083e-05    [TO BE USED IN MCM]
+# After filter: final cross section = 5.619e+00 +- 3.965e-03 pb
+# After filter: final fraction of events with negative weights = 0.000e+00 +- 0.000e+00
+# After filter: final equivalent lumi for 1M events (1/fb) = 1.780e+02 +- 2.178e-01
+xsec_GGtoMuMu = 5.619
+
+# BSM heavy neutrino samples
+xsec_WtoNMu = 100
+
 wprocs = [
     "WplusmunuPostVFP",
     "WminusmunuPostVFP",
@@ -42,6 +56,9 @@ wprocs = [
     "Wminusmunu_winhac-nlo",
     "WplusCharmToMuNu",
     "WminusCharmToMuNu",
+    "WtoNMu_MN-5-V-0p001",
+    "WtoNMu_MN-10-V-0p001",
+    "WtoNMu_MN-50-V-0p001",
 ]
 zprocs = [
     "ZmumuPostVFP",
@@ -179,7 +196,56 @@ absYV_binning = [
     4,
 ]
 
-yll_10quantiles_binning = [-2.5, -1.5, -1.1, -0.7, -0.35, 0, 0.35, 0.7, 1.1, 1.5, 2.5]
+yll_10quantiles_binning = [-2.5, -1.5, -1.0, -0.5, -0.25, 0, 0.25, 0.5, 1.0, 1.5, 2.5]
+
+absYVgen_binning_corr = np.concatenate(
+    (np.arange(0, 2.6, 0.25), [2.75, 3.0, 3.25, 3.5, 3.75, 4.0, 5.0])
+)
+ptVgen_binning_corr = [
+    0,
+    1,
+    2,
+    2.5,
+    3,
+    3.5,
+    4,
+    4.5,
+    5,
+    5.5,
+    6,
+    6.5,
+    7,
+    7.5,
+    8,
+    8.5,
+    9,
+    9.5,
+    10,
+    10.5,
+    11,
+    11.5,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    22,
+    24,
+    26,
+    28,
+    30,
+    33,
+    37,
+    44,
+    54,
+    75,
+    100,
+    1300,
+]
 
 # categorical axes in python bindings always have an overflow bin, so use a regular axis for the charge
 axis_charge = hist.axis.Regular(
@@ -258,12 +324,18 @@ def get_binning_fakes_pt(min_pt, max_pt):
     return edges
 
 
-def get_binning_fakes_mt(mt_cut=40, high_mt_bins=False):
+def get_binning_fakes_mt(mt_cut=40, high_mt_bins=False, fine_mt_binning=False):
     edges = np.array([0, int(mt_cut / 2.0), mt_cut])
     if high_mt_bins:
         # needed for extended 2D method
         edges = np.append(
             edges, [e for e in [30, 32, 34, 36, 38, 40, 44, 49, 55, 62] if e > mt_cut]
+        )
+    if fine_mt_binning:
+        end = 120
+        step = 2
+        edges = np.append(
+            edges, np.linspace(mt_cut + step, end, int((end - mt_cut) / step))
         )
     return edges
 
@@ -281,6 +353,7 @@ def get_dilepton_ptV_binning(fine=False):
         [
             0,
             1,
+            1.5,
             2,
             2.5,
             3,

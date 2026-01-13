@@ -32,37 +32,7 @@ git pull --recurse-submodules upstream main
 git push origin main
 ```
 
-Get combinetf. Need to run cmssw-cc7 (outside of the other singularity image) to work in a special centos7 environment, which allows you to work with CMSSW. If you plan to contribute to the combinetf code, you may first fork from: https://github.com/bendavid/HiggsAnalysis-CombinedLimit
-``` bash
-    cmssw-cc7
-    cd /some/path/to/download/code/
-    export SCRAM_ARCH="slc7_amd64_gcc700"
-    cmsrel CMSSW_10_6_19_patch2
-    cd CMSSW_10_6_19_patch2/src/
-    cmsenv
-    git clone -o bendavid -b tensorflowfit git@github.com:bendavid/HiggsAnalysis-CombinedLimit.git HiggsAnalysis/CombinedLimit
-    cd HiggsAnalysis/CombinedLimit
-    scram b -j 8
-    #
-    # if everything worked fine, folder scripts/ contains "combineCards.py, combinetf.py, commentUncerts.py, pruneUncerts.py, text2hdf5.py, text2workspace.py"
-    # the reference branch is bendavid/tensorflowfit
-    # so your current local branch should also be tensorflowfit
-    #
-    # optional for developments, if you have your own remote fork
-    git remote add origin git@github.com:<YOUR_GITHUB_USER>/HiggsAnalysis-CombinedLimit.git
-    git checkout -b myBranch 
-    git push origin myBranch
-```
-
-To run the fit with combinetf
-``` bash
-    cmssw-cc7
-    cd /path/to/CMSSW_10_6_19_patch2/src/HiggsAnalysis/CombinedLimit/
-    cmsenv
-    cd /wherever/you/like/
-    <commands to run fit> # e.g. using WRemnants/scripts/combine/fitManager.py
-```
-    
+The fit is performed with the submodule [rabbit](https://github.com/WMass/rabbit) in the same singularity.
         
 ### Contribute to the code
 
@@ -88,9 +58,9 @@ Make histograms (only nominal and mass variations for now, systematics are being
 /usr/bin/time -v python scripts/histmakers/mw_with_mu_eta_pt.py -o outputFolder/ --theoryAgnostic --noAuxiliaryHistograms
 ```
 
-Prepare datacards and root files with TH2 (stat-only for now)
+Prepare inputs for the fit (stat-only for now)
 ```
-/usr/bin/time -v python scripts/combine/setupCombine.py -i outputFolder/mw_with_mu_eta_pt_scetlib_dyturboCorr.hdf5  -o outputFolder/  --absolutePathInCard --theoryAgnostic
+/usr/bin/time -v python scripts/combine/setupRabbit.py -i outputFolder/mw_with_mu_eta_pt_scetlib_dyturboCorr.hdf5  -o outputFolder/  --absolutePathInCard --theoryAgnostic
 ```
 To remove the backgrounds and run signal only one can add __--excludeProcGroups Top Diboson Fake Zmumu DYlowMass Ztautau Wtaunu BkgWmunu__
 
@@ -105,9 +75,9 @@ Make histograms (this has all systematics too unlike the standard theory agnosti
 /usr/bin/time -v python scripts/histmakers/mw_with_mu_eta_pt.py -o outputFolder/ --theoryAgnostic --poiAsNoi
 ```
 
-Prepare datacards and root files with TH2
+Prepare inputs for the fit
 ```
-/usr/bin/time -v python scripts/combine/setupCombine.py -i outputFolder/mw_with_mu_eta_pt_scetlib_dyturboCorr.hdf5  -o outputFolder/ --absolutePathInCard --theoryAgnostic --poiAsNoi --priorNormXsec 0.5
+/usr/bin/time -v python scripts/combine/setupRabbit.py -i outputFolder/mw_with_mu_eta_pt_scetlib_dyturboCorr.hdf5  -o outputFolder/ --absolutePathInCard --theoryAgnostic --poiAsNoi --priorNormXsec 0.5
 ```
 To remove the backgrounds and run signal only one can add __--filterProcGroups Wmunu__
 
@@ -124,12 +94,12 @@ python WRemnants/scripts/histmakers/mw_with_mu_eta_pt.py -o outputFolder/
 ```
 More options are loaded from **WRemnants/utilities/common.py**
 
-Make the datacards for single charges and prepare the TH2 histograms for combinetf.
+Make the inputs for the fit.
 ```
-python WRemnants/scripts/combine/setupCombine.py -i outputFolder/mw_with_mu_eta_pt_scetlib_dyturboCorr.hdf5 -o outputFolder/
+python WRemnants/scripts/combine/setupRabbit.py -i outputFolder/mw_with_mu_eta_pt_scetlib_dyturboCorr.hdf5 -o outputFolder/
 ```
 The input file is the output of the previous step.
-The default path specified with __-o__ is the local folder. A subfolder with name identifying the specific analysis (e.g. WMass_pt_eta/) is automatically created inside it. Some options may add tags to the folder name: for example, using --doStatOnly will  call the folder WMass_pt_eta_statOnly/. Can use --absolutePathInCard to write absolute path for files in the datacard, so to allow one to run the fit from any location.
+The default path specified with __-o__ is the local folder. A subfolder with name identifying the specific analysis (e.g. WMass_pt_eta/) is automatically created inside it. Some options may add tags to the folder name: for example, using --doStatOnly will  call the folder WMass_pt_eta_statOnly/.
  
 Combine the datacards for single charges and run the fit (Asimov only)
 ```
@@ -141,7 +111,6 @@ python WRemnants/scripts/combine/fitManager.py -i outputFolder/WMass_pt_eta/ --f
 ```
 
 **NOTE**:
- * to run __fitManager.py__ one has to set a Centos 7 environment with __cmssw-cc7__. Then, one has to activate __cmsenv__ from the folder where combine is installed (once the environment is set one can keep working from inside WRemnants).
  * Each script has tons of options, to customize a gazillion of things, it's simpler to learn them by asking an expert rather that having an incomplete summary here (developments happen faster than documentation anyway).
 
 ### Making plots
@@ -153,7 +122,7 @@ Plot Wmass histograms from hdf5 file (from Wmass histmaker) in the 4 iso-MT regi
 python scripts/analysisTools/tests/testShapesIsoMtRegions.py mw_with_mu_eta_pt_scetlib_dyturboCorr.hdf5 outputFolder/ [--isoMtRegion 0 1 2 3]
 ```
     
-Plot prefit shapes (requires root file from setupCombine.py as input)
+Plot prefit shapes (requires root file from setupRabbit.py as input)
 ```
 python scripts/analysisTools/w_mass_13TeV/plotPrefitTemplatesWRemnants.py WMassCombineInput.root outputFolder/ [-l 16.8] [--pseudodata <pseudodataHistName>] [--wlike]
 ```

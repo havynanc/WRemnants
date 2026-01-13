@@ -28,7 +28,10 @@ def get_values_and_impacts_as_panda(
     uncertainties = {}
     for poi in poi_names:
         impacts, labels = rabbit.io_tools.read_impacts_poi(
-            fitres, poi, grouped=True, global_impacts=global_impacts
+            fitres,
+            poi,
+            grouped=True,
+            impact_type="global" if global_impacts else "traditional",
         )
         scale_factor = (
             float(re.findall(r"(\d+)MeV", poi.astype(str))[0])
@@ -142,7 +145,7 @@ if __name__ == "__main__":
     meta_info = meta["meta_info"]
     lumi = sum([c["lumi"] for c in meta["meta_info_input"]["channel_info"].values()])
 
-    nll = fitresult["nllvalfull"]
+    nll = fitresult["nllvalreduced"]
 
     if args.infileInclusive:
         dfInclusive = get_values_and_impacts_as_panda(
@@ -151,7 +154,7 @@ if __name__ == "__main__":
             global_impacts=args.globalImpacts,
         )
         fInclusive = rabbit.io_tools.get_fitresult(args.infileInclusive)
-        nll_inclusive = fInclusive["nllvalfull"]
+        nll_inclusive = fInclusive["nllvalreduced"]
 
     if args.infileNominal:
         fNominal = rabbit.io_tools.get_fitresult(args.infileNominal)
@@ -221,11 +224,17 @@ if __name__ == "__main__":
 
         # hardcode formatting of known axes
         if "eta" in axes:
+            # this assumes the 48 eta bins are rebinned uniformly, and 0 is an edge of the central bins
+            nEtaBins = df_p.shape[0] if "charge" not in axes else int(df_p.shape[0] / 2)
+            nEtaBinsOneSide = int(nEtaBins / 2)
+            etaWidth = 4.8 / nEtaBins
             df_p["yticks"] = (
-                df_p["eta"].apply(lambda x: round((x - 12) * 0.2, 1)).astype(str)
+                df_p["eta"]
+                .apply(lambda x: round((x - nEtaBinsOneSide) * etaWidth, 1))
+                .astype(str)
                 + r"<\mathit{\eta}^{\mu}<"
                 + df_p["eta"]
-                .apply(lambda x: round((x - 12) * 0.2 + 0.2, 1))
+                .apply(lambda x: round((x - nEtaBinsOneSide) * etaWidth + etaWidth, 1))
                 .astype(str)
             )
             if "charge" in axes:
@@ -354,6 +363,29 @@ if __name__ == "__main__":
                 )
             df_p["yticks"] = (
                 df_p["run"].apply(lambda x: str(axis_ranges[x])).astype(str)
+            )
+        elif "phi" in axes:
+            nPhiBins = df.shape[0]
+            axis_ranges = {i: rf"$\phi^{{\mu}}$ bin {i}" for i in range(nPhiBins)}
+            df_p["yticks"] = (
+                df_p["phi"].apply(lambda x: str(axis_ranges[x])).astype(str)
+            )
+        elif "nRecoVtx" in axes:
+            nRecoVtxBins = df.shape[0]
+            if nRecoVtxBins == 5:
+                axis_ranges = {
+                    0: r"$n_{vtx} \leq 10$",
+                    1: r"$10 < n_{vtx} \leq 15$",
+                    2: r"$15 < n_{vtx} \leq 20$",
+                    3: r"$20 < n_{vtx} \leq 25$",
+                    4: r"$25 < n_{vtx}$",
+                }
+            else:
+                raise RuntimeError(
+                    f"Found {nRecoVtxBins} nRecoVtx bins, which is not yet implemented."
+                )
+            df_p["yticks"] = (
+                df_p["nRecoVtx"].apply(lambda x: str(axis_ranges[x])).astype(str)
             )
         else:
             # otherwise just take noi name
@@ -574,7 +606,12 @@ if __name__ == "__main__":
             central = 0
 
         plot_tools.add_cms_decor(
-            ax1, args.cmsDecor, data=True, lumi=lumi, loc=args.logoPos
+            ax1,
+            args.cmsDecor,
+            data=True,
+            lumi=lumi,
+            loc=args.logoPos,
+            text_size=args.cmsDecorSize,
         )
         plot_tools.addLegend(
             ax1,

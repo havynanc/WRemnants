@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 ## example
-# python tests/testFakesVsMt.py /scratch/mciprian/CombineStudies/12July2023/mw_with_mu_eta_pt_scetlib_dyturboCorr_testFakes_deepMet.hdf5 plots/fromMyWremnants/fitResults/12July2023/testFakes_3DSF/deepMET/noDphiCut/testFakesVsMt/ --palette 87 --rebinx 4 --rebiny 2 --mtBinEdges "0,5,10,15,20,25,30,35,40,45,50,55,60,65" --mtNominalRange "0,40" --mtFitRange "0,40" --fitPolDegree 1 --integralMtMethod sideband -v 4 --maxPt 50  --met deepMET [--dphiStudy] [--jetCut] [--dphiMuonMetCut 0.25]
+# python tests/testFakesVsMt.py /scratch/mciprian/CombineStudies/12July2023/mw_with_mu_eta_pt_scetlib_dyturboCorr_testFakes_deepMet.hdf5 plots/fromMyWremnants/fitResults/12July2023/testFakes_3DSF/deepMET/noDphiCut/testFakesVsMt/ --palette 87 --rebinx 4 --rebiny 2 --mtBinEdges "0,5,10,15,20,25,30,35,40,45,50,55,60,65" --mtNominalRange "0,40" --mtFitRange "0,40" --fitPolDegree 1 --integralMtMethod sideband -v 4 --maxPt 50  --met DeepMET [--dphiStudy] [--jetCut] [--dphiMuonMetCut 0.25]
 #
 # Note: --jet-cut is used to enforce the jet requirement to derive the FRF,
 #       however the validation is made using the nominal histogram, which may or may not have had that cut included
@@ -17,6 +17,7 @@ import sys
 
 import hist
 import numpy as np
+import tensorflow as tf
 
 import narf
 import wums.fitutils
@@ -65,6 +66,10 @@ from scripts.analysisTools.tests.cropNegativeTemplateBins import cropNegativeCon
 from scripts.analysisTools.tests.testPlots1D import plotDistribution1D
 
 # will use as input the histogram mTStudyForFakes with eta-pt-charge-mt-passIso-hasJet, where mt is the full distribution
+
+
+def antiErf_tf(xvals, parms):
+    return parms[0] * (1.0 - tf.math.erf((xvals[0] - parms[1]) / parms[2]))
 
 
 # function to plot 1D data/MC distributions for the iso/nJet bins we have in this study
@@ -160,16 +165,16 @@ def plotProjection1Dfrom3D(
         else:
             if correctionFakes != None and d in ["Fake", "QCD"]:
                 # correct 2D before going to 1D
-                # print(f"nX,nY bins = {rootHists[d].GetNbinsX()}, {rootHists[d].GetNbinsY()}")
+                # logger.info(f"nX,nY bins = {rootHists[d].GetNbinsX()}, {rootHists[d].GetNbinsY()}")
                 hmc2D = rootHists[d].Project3D(f"yxe")
                 cropNegativeContent(hmc2D)
                 hmc2D.SetName(f"{plotName}_{d}_2Dtmp")
-                print()
-                print(f"PlotName: {plotName}")
-                print(f"Fakes norm before corr: {hmc2D.Integral()}")
+                logger.info("")
+                logger.info(f"PlotName: {plotName}")
+                logger.info(f"Fakes norm before corr: {hmc2D.Integral()}")
                 scaleTH2byOtherTH2(hmc2D, correctionFakes, scaleUncertainty=True)
-                print(f"Fakes norm after corr : {hmc2D.Integral()}")
-                print()
+                logger.info(f"Fakes norm after corr : {hmc2D.Integral()}")
+                logger.info("")
                 if axisProj == "x":
                     hmc[d] = hmc2D.ProjectionX(
                         f"{plotName}_{d}", 1, hmc2D.GetNbinsY(), "eo"
@@ -179,7 +184,7 @@ def plotProjection1Dfrom3D(
                         f"{plotName}_{d}", 1, hmc2D.GetNbinsX(), "eo"
                     )
                 else:
-                    print(
+                    logger.info(
                         "Error in plotProjection1Dfrom3D: 'z' axis not permitted for TH2. Abort"
                     )
                     quit()
@@ -237,7 +242,7 @@ def drawAndFitFRF(
             h1.Rebin(rebinFactorX)
         # case in which rebinFactorX is a list of bin edges
         else:
-            h1.Rebin(len(rebinFactorX) - 1, "", array("d", rebinFactorX))
+            h1.Rebin(len(rebinFactorX) - 1, "", array.array("d", rebinFactorX))
 
     xAxisName, setXAxisRangeFromUser, xmin, xmax = getAxisRangeFromUser(labelXtmp)
     yAxisName, setYAxisRangeFromUser, ymin, ymax = getAxisRangeFromUser(labelYtmp)
@@ -272,11 +277,20 @@ def drawAndFitFRF(
 
     if ymin == ymax == 0.0:
         ymin, ymax = getMinMaxHisto(h1, excludeEmpty=True, sumError=True)
+        # if ymax > 5:
+        #     # some points might have huge error bars, but reasonable central value
+        #     ymin_v2, ymax_v2 = getMinMaxHisto(h1, excludeEmpty=True, sumError=False)
+        #     if ymax > ymax_v2:
+        #         ymax = ymax_v2
+        #     else:
+        #         ymax = 5
         diff = ymax - ymin
         ymin -= diff * 0.25
         ymax += diff * 0.45
         if ymin < 0:
             ymin = 0
+        if ymax > 5.0:
+            ymax = 5.0
 
     h1.GetXaxis().SetTitle(xAxisName)
     h1.GetXaxis().SetTitleOffset(1.2)
@@ -300,7 +314,7 @@ def drawAndFitFRF(
     h1.Draw("EP")
 
     xMinFit, xMaxFit = map(float, fitRange.split(","))
-    # print(f"Fit range [{xMinFit}, {xMaxFit}] ({xMaxFit-xMinFit} wide)")
+    # logger.info(f"Fit range [{xMinFit}, {xMaxFit}] ({xMaxFit-xMinFit} wide)")
 
     # tensorflow fit cannot select a subrange to fit, so need to make the boost histogram directly from
     # a new ROOT histograms defined in the actual fit range
@@ -310,9 +324,12 @@ def drawAndFitFRF(
         round(h1.GetXaxis().GetBinLowEdge(i), 2)
         for i in range(fitBinLow, fitBinHigh + 1)
     ]
-    # print(fitBinEdges)
+    # logger.info(fitBinEdges)
     h1fitRange = ROOT.TH1D(
-        f"{h1.GetName()}_fitRange", "", len(fitBinEdges) - 1, array("d", fitBinEdges)
+        f"{h1.GetName()}_fitRange",
+        "",
+        len(fitBinEdges) - 1,
+        array.array("d", fitBinEdges),
     )
     for ib in range(1, 1 + h1fitRange.GetNbinsX()):
         binOriginalHisto = ib + fitBinLow - 1
@@ -337,17 +354,27 @@ def drawAndFitFRF(
     status = fitres_tf1["status"]
     covstatus = fitres_tf1["covstatus"]
     if status:
-        print(f"\n\n-----> STATUS: fit had status {status}\n\n")
+        logger.warning(f"\n\n-----> STATUS: fit had status {status}\n\n")
         if status not in badFitsID.keys():
             badFitsID[status] = 1
         else:
             badFitsID[status] += 1
     if covstatus:
-        print(f"\n\n-----> COV: fit had covstatus {covstatus}\n\n")
+        logger.warning(f"\n\n-----> COV: fit had covstatus {covstatus}\n\n")
         if covstatus not in badCovMatrixID.keys():
             badCovMatrixID[covstatus] = 1
         else:
             badCovMatrixID[covstatus] += 1
+
+    fitres_tf1_antiErf = wums.fitutils.fit_hist(
+        boost_hist, antiErf_tf, np.array([1.0, 60.0, 5.0])
+    )
+    f1_antiErf = ROOT.TF1(
+        "f1_antiErf",
+        "[0] * (1.0 - TMath::Erf((x-[1])/[2]))",
+        xMinFit,
+        xMaxFit,
+    )
 
     # get chi 2:
     chi2 = fitres_tf1["loss_val"]
@@ -399,6 +426,12 @@ def drawAndFitFRF(
     f2.SetLineWidth(3)
     f2.SetLineStyle(9)
 
+    # test anti error function
+    f1_antiErf.SetParameters(np.array(fitres_tf1_antiErf["x"], dtype=np.dtype("d")))
+    f1_antiErf.SetLineWidth(3)
+    # f1_antiErf.SetLineStyle(9) # ROOT.kDashed == thin dashes, almost dotted
+    f1_antiErf.SetLineColor(ROOT.kRed + 2)
+
     xvalMin = h1.GetXaxis().GetBinLowEdge(1)
     xvalMax = h1.GetXaxis().GetBinUpEdge(h1.GetNbinsX())
     funcFullRange = ROOT.TF1(
@@ -412,7 +445,7 @@ def drawAndFitFRF(
     for ib in range(1, hband.GetNbinsX() + 1):
         xval = hband.GetBinCenter(ib)
         val = f1.Eval(xval)
-        # print(f"val({xval}) = {val}")
+        # logger.info(f"val({xval}) = {val}")
         hband.SetBinContent(ib, val)
 
     npar = len(params)
@@ -422,7 +455,7 @@ def drawAndFitFRF(
     altParameters = np.array(
         [np.zeros(npar, dtype=np.dtype("d"))] * (npar * 2), dtype=np.dtype("d")
     )
-    # print(altParameters)
+    # logger.info(altParameters)
     for ivar in range(npar):
         shift = np.sqrt(e[ivar]) * v[:, ivar]
         altParameters[ivar] = fitres_tf1["x"] + shift
@@ -450,6 +483,7 @@ def drawAndFitFRF(
     f1.Draw("L SAME")
     if xMaxFit < xvalMax:
         f2.Draw("L SAME")
+    f1_antiErf.Draw("L SAME")
     h1.Draw("EP SAME")
 
     nColumnsLeg = 1
@@ -471,6 +505,7 @@ def drawAndFitFRF(
     if xMaxFit < xvalMax:
         leg.AddEntry(f2, f"Extrapolation", "L")
     leg.AddEntry(hband, "Fit uncertainty", "F")
+    leg.AddEntry(f1_antiErf, f"Fit f(x) = 1 - Erf[x]", "L")
     leg.Draw("same")
     canvas.RedrawAxis("sameaxis")
 
@@ -575,7 +610,7 @@ def drawAndFitFRF(
             addValCap = max(0.0, valFRFcap) * mTshapeBinContent
             averageFRF += addVal
             averageFRFcap += addValCap
-            # print(f"{ib}: mT = {mTbinVal}, FRF={valFRF}, PDF(mT) = {mTshapeBinContent*integralMtNorm}, addVal = {addVal*integralMtNorm}")
+            # logger.info(f"{ib}: mT = {mTbinVal}, FRF={valFRF}, PDF(mT) = {mTshapeBinContent*integralMtNorm}, addVal = {addVal*integralMtNorm}")
             for ivar in range(npar):
                 # set parameters for a given hessian
                 tf1_func_alt.SetParameters(
@@ -617,6 +652,7 @@ def drawAndFitFRF(
 ################################################################
 
 # need to define functions as global below to avoid them being deleted out of fitTurnOnTF
+antiErf_global = None
 polN_scaled_global = None
 pol0_scaled_global = None  # only needed with straight line fit, to perform check fitting with horizontal line
 badFitsID = {}
@@ -691,7 +727,7 @@ def runStudy(fname, charges, mainOutputFolder, args):
         hnarf_fakerateDeltaPhi = None
         for d in datasets:
             s = hist.tag.Slicer()
-            # print(d)
+            # logger.info(d)
             hnarfTMP = histInfo[d].hists[inputHistName]
             if charge == "inclusive":
                 # integrate but keep charge axis with 1 single bin
@@ -1555,7 +1591,7 @@ def runStudy(fname, charges, mainOutputFolder, args):
                 round(etaLow, 1),
                 round(etaHigh, 1),
                 nMtBins,
-                array("d", mtEdges),
+                array.array("d", mtEdges),
             )
 
             outfolder1D = outfolder + "fakerateFactor_fits_pt%dto%d/" % (
@@ -1574,13 +1610,13 @@ def runStudy(fname, charges, mainOutputFolder, args):
                 )
                 etaBinLow = round(0.01 + etaBinLowNoRound, 1)
                 etaBinHigh = round(0.01 + etaBinHighNoRound, 1)
-                # print(f"ieta = {ieta}    {ptBinLow} < pt < {ptBinHigh}     {etaBinLow} < eta < {etaBinHigh}    {etaBinLow} < etaNoRound < {etaBinHigh}")
+                # logger.info(f"ieta = {ieta}    {ptBinLow} < pt < {ptBinHigh}     {etaBinLow} < eta < {etaBinHigh}    {etaBinLow} < etaNoRound < {etaBinHigh}")
                 hFRfactorVsMt = ROOT.TH1D(
                     f"hFRfactorVsMt_ieta{ieta}_pt{ptBinLow}to{ptBinHigh}",
                     "%.1f < %s < %.1f, p_{T} #in [%d, %d] GeV"
                     % (etaBinLow, etaLabel, etaBinHigh, ptBinLow, ptBinHigh),
                     nMtBins,
-                    array("d", mtEdges),
+                    array.array("d", mtEdges),
                 )
 
                 # to make easier computation of correction factor below
@@ -1633,7 +1669,7 @@ def runStudy(fname, charges, mainOutputFolder, args):
                         outfolder1D,
                         passCanvas=canvas1D,
                         moreTextLatex=textLatex,
-                        legendCoords="0.64,0.96,0.69,0.93",
+                        legendCoords="0.6,0.96,0.61,0.93",
                         fitRange=args.mtFitRange,
                         mTshape=projMt,
                         fitPolDegree=args.fitPolDegree,
@@ -1641,7 +1677,7 @@ def runStudy(fname, charges, mainOutputFolder, args):
                         histoChi2diffTest=histoChi2diffTest,
                         histoPullsPol1Slope=histoPullsPol1Slope,
                     )
-                    # print(f"{valFRF}, {valFRFCap}")
+                    # logger.info(f"{valFRF}, {valFRFCap}")
                     if valFRF < 0:
                         printLine(marker=" ")
                         printLine()
@@ -2037,24 +2073,24 @@ def runStudy(fname, charges, mainOutputFolder, args):
             )
             etaPtChargeTemplate.Write()
 
-        print()
-        print(
+        logger.info("")
+        logger.info(
             f"Saving FRF correction vs eta-pt in file\n{outFile}\nfor charge {charge}"
         )
-        print()
+        logger.info("")
         fout.Close()
 
-        print("-" * 30)
-        print("### Bad fit status")
-        print("### | status | number of bad bins|")
+        logger.info("-" * 30)
+        logger.info("### Bad fit status")
+        logger.info("### | status | number of bad bins|")
         for key in sorted(badFitsID.keys()):
-            print(f"{key}  {badFitsID[key]}")
-        print("-" * 30)
-        print("### Bad covariance matrix status")
-        print("### | status | number of bad bins|")
+            logger.info(f"{key}  {badFitsID[key]}")
+        logger.info("-" * 30)
+        logger.info("### Bad covariance matrix status")
+        logger.info("### | status | number of bad bins|")
         for key in sorted(badCovMatrixID.keys()):
-            print(f"{key}  {badCovMatrixID[key]}")
-        print("-" * 30)
+            logger.info(f"{key}  {badCovMatrixID[key]}")
+        logger.info("-" * 30)
 
 
 ######
@@ -2256,8 +2292,8 @@ if __name__ == "__main__":
     parser.add_argument("-z", "--zAxisName", default="m_{T} (GeV)", help="z axis name")
     parser.add_argument(
         "--met",
-        default="deepMET",
-        choices=["deepMET", "PFMET"],
+        default="DeepMET",
+        choices=["DeepMET", "PFMET"],
         help="Met type, which also updates the mT definition when used as axis labels",
     )
     parser.add_argument(
@@ -2410,8 +2446,8 @@ if __name__ == "__main__":
         outFile = mainOutputFolder + fname
         mergeCmd = f"hadd -f {outFile} {' '.join(filesToMerge)}"
         safeSystem(mergeCmd)
-        print()
-        print(f"Saving all FRF corrections vs eta-pt in file {outFile}")
-        print()
+        logger.info("")
+        logger.info(f"Saving all FRF corrections vs eta-pt in file {outFile}")
+        logger.info("")
 
     copyOutputToEos(mainOutputFolder, outdir_original, eoscp=args.eoscp)

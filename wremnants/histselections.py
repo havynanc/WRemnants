@@ -844,8 +844,6 @@ class FakeSelectorSimpleABCD(HistselectorABCD):
                     "splines with reduction over regions not implemented yet."
                 )
 
-            print("splines")
-
             sval, svar = spline_smooth(
                 sval,
                 edges=edges,

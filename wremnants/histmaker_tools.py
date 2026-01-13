@@ -192,7 +192,7 @@ def write_analysis_output(results, outfile, args):
     with h5py.File(outfile, open_as) as f:
         for k, v in results.items():
             logger.debug(f"Pickle and dump {k}")
-            ioutils.pickle_dump_h5py(k, v, f)
+            ioutils.pickle_dump_h5py(k, v, f, override=open_as != "w")
 
         if "meta_info" not in f.keys():
             ioutils.pickle_dump_h5py(
@@ -331,3 +331,42 @@ def make_quantile_helper(
         )
 
     return helpers
+
+
+def make_muon_phi_axis(phi_bins, ax_name="phi", flows=False):
+    # TODO: worth having different axis type (e.g. Regular with
+    # circular=True) depending on the list of edges?
+    if isinstance(phi_bins, int) or len(phi_bins) == 1:
+        nphi = phi_bins if isinstance(phi_bins, int) else int(phi_bins[0])
+        phi_width = 2.0 / nphi
+        phi_edges = [(-1.0 + i * phi_width) * np.pi for i in range(nphi + 1)]
+    else:
+        phi_edges = [x for x in phi_bins]
+
+    phi_axis = hist.axis.Variable(
+        np.array(phi_edges), name=ax_name, underflow=flows, overflow=flows
+    )
+
+    return phi_axis
+
+
+def define_norm_weight_nRecoVtx(
+    df, vtx_axis_edges, vtx_norm_weight, flows_to_unit=False
+):
+    df = df.DefinePerSample(
+        "nRecoVtxEdges",
+        "ROOT::VecOps::RVec<double> res = {"
+        + ",".join([str(x) for x in vtx_axis_edges])
+        + "}; return res;",
+    )
+    df = df.DefinePerSample(
+        "weightVals",
+        "ROOT::VecOps::RVec<double> res = {"
+        + ",".join([str(x) for x in vtx_norm_weight])
+        + "}; return res;",
+    )
+    df = df.Define(
+        "weight_nRecoVtx",
+        f"wrem::get_differential_norm_weight(PV_npvsGood, nRecoVtxEdges, weightVals, {flows_to_unit})",
+    )
+    return df

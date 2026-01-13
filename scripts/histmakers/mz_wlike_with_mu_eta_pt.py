@@ -32,7 +32,9 @@ from wremnants.datasets.dataset_tools import getDatasets
 from wremnants.helicity_utils_polvar import makehelicityWeightHelper_polvar
 from wremnants.histmaker_tools import (
     aggregate_groups,
+    define_norm_weight_nRecoVtx,
     get_run_lumi_edges,
+    make_muon_phi_axis,
     scale_to_data,
     write_analysis_output,
 )
@@ -289,8 +291,8 @@ muon_prefiring_helper, muon_prefiring_helper_stat, muon_prefiring_helper_syst = 
     muon_prefiring.make_muon_prefiring_helpers(era=era)
 )
 
-qcdScaleByHelicity_helper = theory_corrections.make_qcd_uncertainty_helper_by_helicity(
-    is_z=True
+theory_helpers_procs = theory_corrections.make_theory_helpers(
+    args, corrs=["qcdScale", "alphaS", "pdf"]
 )
 
 # extra axes which can be used to label tensor_axes
@@ -445,7 +447,10 @@ def build_graph(df, dataset):
     isW = dataset.name in common.wprocs
     isZ = dataset.name in common.zprocs
     isWorZ = isW or isZ
-    apply_theory_corr = theory_corrs and dataset.name in corr_helpers
+
+    theory_helpers = None
+    if isWorZ:
+        theory_helpers = theory_helpers_procs[dataset.name[0]]
 
     if dataset.is_data:
         df = df.DefinePerSample("weight", "1.0")
@@ -456,11 +461,26 @@ def build_graph(df, dataset):
     df = df.Define(
         "isEvenEvent", f"event % 2 {'!=' if args.flipEventNumberSplitting else '=='} 0"
     )
-
     weightsum = df.SumAndCount("weight")
 
     axes = nominal_axes
     cols = nominal_cols
+
+    if args.addMuonPhiAxis is not None:
+        axes = [*axes, make_muon_phi_axis(args.addMuonPhiAxis)]
+        cols = [*cols, "trigMuons_phi0"]
+
+    if args.addNvtxAxis is not None:
+        axes = [
+            *axes,
+            hist.axis.Variable(
+                np.array(args.addNvtxAxis),
+                name="nRecoVtx",
+                underflow=False,
+                overflow=False,
+            ),
+        ]
+        cols = [*cols, "PV_npvsGood"]
 
     if args.addRunAxis:
         run_edges, lumi_edges = get_run_lumi_edges(args.nRunBins, era)
@@ -554,7 +574,7 @@ def build_graph(df, dataset):
                     args,
                     dataset.name,
                     corr_helpers,
-                    qcdScaleByHelicity_helper,
+                    theory_helpers,
                     [a for a in unfolding_axes[level] if a.name != "acceptance"],
                     [c for c in unfolding_cols[level] if c != f"{level}_acceptance"],
                     base_name=level,
@@ -763,6 +783,11 @@ def build_graph(df, dataset):
         if not args.noVertexWeight:
             weight_expr += "*weight_vtx"
 
+        # for tests to split into number of reconstructed vertices
+        if args.addNvtxAxis is not None and args.normWeightNvtx is not None:
+            df = define_norm_weight_nRecoVtx(df, args.addNvtxAxis, args.normWeightNvtx)
+            weight_expr += "*weight_nRecoVtx"
+
         muonVarsForSF = [
             "tnpPt0",
             "tnpEta0",
@@ -877,7 +902,7 @@ def build_graph(df, dataset):
         logger.debug(f"Exp weight defined: {weight_expr}")
         df = df.Define("exp_weight", weight_expr)
         df = theory_tools.define_theory_weights_and_corrs(
-            df, dataset.name, corr_helpers, args
+            df, dataset.name, corr_helpers, args, theory_helpers=theory_helpers
         )
 
     results.append(
@@ -1122,11 +1147,16 @@ def build_graph(df, dataset):
         if dataset.is_data:
             df = df.DefinePerSample("nominal_weight_noPUandVtx", "1.0")
             df = df.DefinePerSample("nominal_weight_noVtx", "1.0")
+            df = df.DefinePerSample("nominal_weight_noSF", "1.0")
         else:
             df = df.Define(
                 "nominal_weight_noPUandVtx", "nominal_weight/(weight_pu*weight_vtx)"
             )
             df = df.Define("nominal_weight_noVtx", "nominal_weight/weight_vtx")
+            df = df.Define(
+                "nominal_weight_noSF",
+                "nominal_weight/weight_fullMuonSF_withTrackingReco",
+            )
 
         axis_nRecoVtx = hist.axis.Regular(50, 0.5, 50.5, name="PV_npvsGood")
         axis_fixedGridRhoFastjetAll = hist.axis.Regular(
@@ -1204,6 +1234,8 @@ def build_graph(df, dataset):
 
     nominal = df.HistoBoost("nominal", axes, [*cols, "nominal_weight"])
     results.append(nominal)
+    nominal_noSF = df.HistoBoost("nominal_noSF", axes, [*cols, "nominal_weight_noSF"])
+    results.append(nominal_noSF)
 
     if useTnpMuonVarForSF and not args.onlyMainHistograms and not args.unfolding:
         df = df.Define(
@@ -1387,7 +1419,7 @@ def build_graph(df, dataset):
                 args,
                 dataset.name,
                 corr_helpers,
-                qcdScaleByHelicity_helper,
+                theory_helpers,
                 axes,
                 cols,
                 for_wmass=False,

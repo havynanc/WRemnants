@@ -187,11 +187,11 @@ dataDictV9 = {
         "xsec": 238800,
         "group": "QCD",
     },
-    "GGToLLMass5to50PostVFP": {
+    "GGToMuMuMass5to50PostVFP": {
         "filepaths": [
-            "{BASE_PATH}/GGToLL_M-5To50_TuneCP5_13TeV-pythia8/NanoV9MCPostVFP_{NANO_PROD_TAG}",
+            "{BASE_PATH}/GGToMuMu_M-5To50_TuneCP5_13TeV-pythia8/NanoV9MCPostVFP_{NANO_PROD_TAG}",
         ],
-        "xsec": 9.448e02,
+        "xsec": common.xsec_GGtoMuMu,
         "group": "PhotonInduced",
     },
     "GGToLLPostVFP": {
@@ -216,6 +216,27 @@ dataDictV9 = {
         "xsec_up": 4.827e01,
         "xsec_dn": 3.588e01,
         "group": "PhotonInduced",
+    },
+    "WtoNMu_MN-5-V-0p001": {
+        "filepaths": [
+            "{BASE_PATH}/WtoNMu_MN-5-V-0p001_TuneCP5_13TeV_madgraph-pythia8/"
+        ],
+        "xsec": common.xsec_WtoNMu,
+        "group": "WtoNMu_5",
+    },
+    "WtoNMu_MN-10-V-0p001": {
+        "filepaths": [
+            "{BASE_PATH}/WtoNMu_MN-10-V-0p001_TuneCP5_13TeV_madgraph-pythia8/"
+        ],
+        "xsec": common.xsec_WtoNMu,
+        "group": "WtoNMu_10",
+    },
+    "WtoNMu_MN-50-V-0p001": {
+        "filepaths": [
+            "{BASE_PATH}/WtoNMu_MN-50-V-0p001_TuneCP5_13TeV_madgraph-pythia8/"
+        ],
+        "xsec": common.xsec_WtoNMu,
+        "group": "WtoNMu_50",
     },
 }
 
