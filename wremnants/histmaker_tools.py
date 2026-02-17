@@ -151,7 +151,7 @@ def write_analysis_output(results, outfile, args):
 
     to_append = []
     if args.theoryCorr and not args.theoryCorrAltOnly:
-        to_append.append(args.theoryCorr[0] + "Corr")
+        to_append.append(args.theoryCorr[0] + "_Corr")
     if args.maxFiles is not None:
         to_append.append(f"maxFiles_{args.maxFiles}".replace("-", "m"))
     if len(args.pdfs) >= 1 and args.pdfs[0] != "ct18z":
@@ -238,7 +238,7 @@ def make_quantile_helper(
     axes,
     dependent_axes=[],
     name="nominal",
-    processes=["ZmumuPostVFP"],
+    processes=["Zmumu_2016PostVFP"],
     n_quantiles=[],
 ):
     """

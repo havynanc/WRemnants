@@ -71,27 +71,27 @@ def syst_transform_map(base_hist, hist_name):
     }
     transforms["scetlib_dyturboMSHT20Up"] = {
         "action": lambda h: pdfUnc(h, "pdfMSHT20", "vars")[0],
-        "procs": common.vprocs_all,
+        "procs": common.vprocs,
     }
     transforms["scetlib_dyturboMSHT20Down"] = {
         "action": lambda h: pdfUnc(h, "pdfMSHT20", "vars")[1],
-        "procs": common.vprocs_all,
+        "procs": common.vprocs,
     }
     transforms["scetlib_dyturboCT18ZUp"] = {
         "action": lambda h: pdfUnc(h, "pdfCT18Z", "vars")[0],
-        "procs": common.vprocs_all,
+        "procs": common.vprocs,
     }
     transforms["scetlib_dyturboCT18ZDown"] = {
         "action": lambda h: pdfUnc(h, "pdfCT18Z", "vars")[1],
-        "procs": common.vprocs_all,
+        "procs": common.vprocs,
     }
     transforms["scetlib_dyturboMSHT20an3loUp"] = {
         "action": lambda h: pdfUnc(h, "pdfMSHT20", "vars")[0],
-        "procs": common.zprocs_all,
+        "procs": common.zprocs,
     }
     transforms["scetlib_dyturboMSHT20an3loDown"] = {
         "action": lambda h: pdfUnc(h, "pdfMSHT20", "vars")[1],
-        "procs": common.zprocs_all,
+        "procs": common.zprocs,
     }
     transforms["ewUp"] = {
         "action": lambda h, **args: (
@@ -1077,7 +1077,7 @@ def hist_to_variations(
 
     variation_hist = hist.Hist(
         *hist_in.axes,
-        storage=hist_in._storage_type(),
+        storage=hist_in.storage_type(),
         name=out_name,
         data=variation_data,
     )
@@ -1092,7 +1092,7 @@ def uncertainty_hist_from_envelope(h, proj_ax, entries):
     hup = hh.syst_min_or_max_env_hist(
         h, proj_ax, "vars", entries, no_flow=["ptVgen"], do_min=False
     )
-    hnew = hist.Hist(*h.axes[:-1], common.down_up_axis, storage=h._storage_type())
+    hnew = hist.Hist(*h.axes[:-1], common.down_up_axis, storage=h.storage_type())
     hnew[..., 0] = hdown.view(flow=True)
     hnew[..., 1] = hup.view(flow=True)
     return hnew
@@ -1201,7 +1201,7 @@ def add_syst_hist(
 def define_mass_width_sin2theta_weights(df, proc):
 
     # TODO can these be parsed more automatically?
-    if proc in common.zprocs_all:
+    if proc in common.zprocs:
         m0 = 91.1876
         gamma0 = 2.4941343245745466
         massvals = [
@@ -1332,7 +1332,7 @@ def define_mass_width_sin2theta_weights(df, proc):
             "auto res = widthWeight_tensor; res = nominal_weight*res; return res;",
         )
 
-        if proc in common.zprocs_all:
+        if proc in common.zprocs:
             if df.HasColumn("MEParamWeightAltSet4"):
                 df = df.Alias("sin2thetaWeight_col", "MEParamWeightAltSet4")
             elif df.HasColumn("LHEReweightingWeight"):
@@ -1394,7 +1394,7 @@ def massWeightNames(matches=None, proc="", exclude=[]):
         for i in range(nweights)
         if int(abs(central - i) * 10) not in exclude
     ]
-    if proc and (proc in common.zprocs_all or proc == "Z") and 2.1 not in exclude:
+    if proc and (proc in common.zprocs or proc == "Z") and 2.1 not in exclude:
         # This is the PDG uncertainty (turned off for now since it doesn't seem to have been read into the nano)
         names.extend(["massShiftZ2p1MeVDown", "massShiftZ2p1MeVUp"])
 
@@ -1730,7 +1730,7 @@ def add_qcdScaleByHelicityUnc_hist(
 def add_pdfUncertByHelicity_hist(
     results, df, helper, pdf, pdf_name, axes, cols, base_name="nominal", **kwargs
 ):
-    name = Datagroups.histName(base_name, syst=f"{pdf_name}UncertByHelicity")
+    name = Datagroups.histName(base_name, syst=f"{pdf_name}ByHelicity")
     tensorName = f"helicity{pdf_name}Weight_tensor"
     if tensorName not in df.GetColumnNames():
         # usually already defined when calculating central PDF weight
@@ -1747,7 +1747,7 @@ def add_pdfUncertByHelicity_hist(
             ],
         )
     safeTensorName = f"{tensorName}_clamped"
-    renorm = theory_tools.pdfMap[pdf].get("renorm", False)
+    renorm = theory_tools.pdfMap.get(pdf, {}).get("renorm", False)
     if renorm:
         central_event_weight = "nominal_weight"
     else:
@@ -1841,7 +1841,7 @@ def add_theory_corr_hists(
 
         var_axis = helpers[generator].tensor_axes[-1]
 
-        name = Datagroups.histName(base_name, syst=f"{generator}Corr")
+        name = Datagroups.histName(base_name, syst=f"{generator}_Corr")
         weight_tensor_name = f"{generator}Weight_tensor"
         add_syst_hist(
             results, df, name, axes, cols, weight_tensor_name, var_axis, **kwargs
@@ -1878,7 +1878,7 @@ def add_theory_corr_hists(
             # include nominal as well
             omegaidxs = [0] + omegaidxs
 
-            tensor_name = f"{generator}FlavDepNP"
+            tensor_name = f"{generator}_FlavDepNP"
             if tensor_name not in df.GetColumnNames():
                 np_idx_helper = ROOT.wrem.index_taker[
                     df.GetColumnType(weight_tensor_name), len(omegaidxs)
@@ -1899,9 +1899,15 @@ def add_theory_corr_hists(
                     0, 1, name="chargeVgenNP", underflow=False, overflow=False
                 )
 
+            axis_absYVgen = hist.axis.Variable(
+                common.absYWgen_binning_corr if isW else common.absYZgen_binning_corr,
+                name="absYVgenNP",
+                underflow=False,
+            )
+
             # since the last column might be an additional weight, the extra columns and axes have to go at the appropriate place
             nax = len(axes)
-            axes_FlavDepNP = [*axes, theory_tools.axis_absYVgen, axis_chargegen]
+            axes_FlavDepNP = [*axes, axis_absYVgen, axis_chargegen]
             cols_FlavDepNP = cols[:nax] + ["absYVgen", "chargeVgen"] + cols[nax:]
             name = Datagroups.histName(base_name, syst=tensor_name)
             add_syst_hist(
@@ -1934,7 +1940,7 @@ def add_theory_corr_hists(
             # include nominal as well
             scaleidxs = [0] + scaleidxs
 
-            tensor_name = f"{generator}PtDepScales"
+            tensor_name = f"{generator}_PtDepScales"
             if tensor_name not in df.GetColumnNames():
                 scale_idx_helper = ROOT.wrem.index_taker[
                     df.GetColumnType(weight_tensor_name), len(scaleidxs)
@@ -2461,7 +2467,7 @@ def scetlib_scale_unc_hist(h, obs, syst_ax="vars"):
     hnew = hist.Hist(
         *h.axes[:-1],
         hist.axis.StrCategory(["central"] + scetlib_scale_vars(), name=syst_ax),
-        storage=h._storage_type(),
+        storage=h.storage_type(),
     )
 
     hnew[..., "central"] = h[..., "central"].view(flow=True)
@@ -2524,7 +2530,7 @@ def add_theory_hists(
         scale_axes = axes
         scale_cols = cols
 
-    isZ = dataset_name in common.zprocs_all
+    isZ = dataset_name in common.zprocs
 
     df = theory_tools.define_scale_tensor(df)
 
@@ -2575,6 +2581,7 @@ def add_theory_hists(
                 scale_cols,
                 **info,
             )
+
         if theory_helpers.get("pdf") is not None:
             pdf_helpers = theory_helpers.get("pdf")
             for pdf in args.pdfs:
@@ -2597,12 +2604,28 @@ def add_theory_hists(
                     cols,
                     **info,
                 )
-        if theory_helpers.get("alphaS") is not None:
+        for pdf_name, pdf_from_corr_helper in theory_helpers.get(
+            "pdf_from_corr", {}
+        ).items():
             logger.debug(
-                f"Make AlphaS uncertainty by helicity histograms for {dataset_name}"
+                f"Make PDF (from correction file) uncertainty by helicity histograms for {dataset_name} and PDF from correction {pdf_name}"
             )
-            for k, v in theory_helpers["alphaS"].items():
-                add_pdfAlphaSByHelicity_hist(results, df, v, axes, cols, name=k, **info)
+            add_pdfUncertByHelicity_hist(
+                results,
+                df,
+                pdf_from_corr_helper,
+                pdf_name,
+                pdf_name,
+                axes,
+                cols,
+                **info,
+            )
+
+        for k, v in theory_helpers.get("alphaS", {}).items():
+            logger.debug(
+                f"Make alphaS uncertainty by helicity histogram for {dataset_name} and alphaS from correction {k}"
+            )
+            add_pdfAlphaSByHelicity_hist(results, df, v, axes, cols, name=k, **info)
 
         add_breit_wigner_mass_weights_hist(
             results, df, axes, cols, proc=dataset_name, **info

@@ -24,7 +24,8 @@ logger = logging.child_logger(__name__)
 def valid_theory_corrections():
     corr_files = glob.glob(common.data_dir + "TheoryCorrections/*Corr*.pkl.lz4")
     matches = [
-        re.match(r"(^.*)Corr[W|Z]\.pkl\.lz4", os.path.basename(c)) for c in corr_files
+        re.match(r"(^.*)_Corr[W|Z|BSM]\.pkl\.lz4", os.path.basename(c))
+        for c in corr_files
     ]
     return [m[1] for m in matches if m] + ["none"]
 
@@ -55,10 +56,10 @@ def load_corr_helpers(
             else:
                 label = proc[0]
 
-            fname = f"{base_dir}/{generator}Corr{label}.pkl.lz4"
+            fname = f"{base_dir}/{generator}_Corr{label}.pkl.lz4"
             if not os.path.isfile(fname):
                 logger.warning(
-                    f"Did not find correction file for process {proc}, generator {generator}. No correction will be applied for this process!"
+                    f"Did not find correction file {fname} for process {proc}, generator {generator}. No correction will be applied for this process!"
                 )
                 continue
             logger.debug(f"Make theory correction helper for file: {fname}")
@@ -318,9 +319,7 @@ def postprocess_corr_hist(corrh, numh=None):
     vars_out = list(corrh.axes["vars"]) + list(additional_var_hists.keys())
 
     vars_out_axis = hist.axis.StrCategory(vars_out, name="vars")
-    corrh_tmp = hist.Hist(
-        *corrh.axes[:-1], vars_out_axis, storage=corrh._storage_type()
-    )
+    corrh_tmp = hist.Hist(*corrh.axes[:-1], vars_out_axis, storage=corrh.storage_type())
 
     for i, var in enumerate(vars_out_axis):
         if var in corrh.axes["vars"]:
@@ -512,41 +511,42 @@ def make_corr_by_helicity(
 
 
 def make_theory_helpers(
-    args, procs=["Z", "W"], corrs=["qcdScale", "pdf", "alphaS", "pdf_central"]
+    pdfs,
+    theory_corr=[],
+    procs=["Z", "W"],
+    corrs=["qcdScale", "pdf", "pdf_from_corr", "alphaS", "pdf_central"],
 ):
 
     theory_helpers_procs = {p: {} for p in procs}
 
-    if "Z" in procs and "qcdScale" in corrs:
-        theory_helpers_procs["Z"]["qcdScale"] = make_qcd_uncertainty_helper_by_helicity(
-            is_z=True,
-            filename=(
-                f"{common.data_dir}/angularCoefficients/w_z_helicity_xsecs_maxFiles_m1_alphaSunfoldingBinning_helicity.hdf5"
-                if args.unfolding
-                else f"{common.data_dir}/angularCoefficients/w_z_moments.hdf5"
-            ),
-            rebin_ptVgen=False,
-            return_tensor=True,
-        )
-    if "W" in procs and "qcdScale" in corrs:
-        theory_helpers_procs["W"]["qcdScale"] = make_qcd_uncertainty_helper_by_helicity(
-            is_z=False,
-            filename=(f"{common.data_dir}/angularCoefficients/w_z_moments.hdf5"),
-            rebin_ptVgen=False,
-            return_tensor=True,
-        )
-
     for proc in theory_helpers_procs.keys():
+
+        if "qcdScale" in corrs:
+            theory_helpers_procs[proc]["qcdScale"] = (
+                make_qcd_uncertainty_helper_by_helicity(
+                    is_z=proc == "Z",
+                    rebin_ptVgen=False,
+                    return_tensor=True,
+                )
+            )
 
         if "pdf" in corrs:
             theory_helpers_procs[proc]["pdf"] = (
                 make_pdfs_uncertainties_helper_by_helicity(
                     proc=proc,
-                    pdfs=args.pdfs,
+                    pdfs=pdfs,
+                )
+            )
+        if "pdf_from_corr" in corrs:
+            pdf_from_corrs = [x + "_Corr" for x in theory_corr if "pdfvar" in x]
+            theory_helpers_procs[proc]["pdf_from_corr"] = (
+                make_pdfs_from_corrs_uncertainties_helper_by_helicity(
+                    proc=proc,
+                    pdfs_from_corrs=pdf_from_corrs,
                 )
             )
         if "alphaS" in corrs:
-            as_vars = [x + "Corr" for x in args.theoryCorr if "pdfas" in x]
+            as_vars = [x + "_Corr" for x in theory_corr if "pdfas" in x]
             theory_helpers_procs[proc]["alphaS"] = (
                 make_alphaS_uncertainties_helper_by_helicity(
                     proc=proc,
@@ -557,11 +557,11 @@ def make_theory_helpers(
             theory_helpers_procs[proc]["pdf_central"] = (
                 make_uncertainty_helper_by_helicity(
                     proc=proc,
-                    nom=theory_tools.pdfMap[args.pdfs[0]]["name"],
+                    nom=theory_tools.pdfMap[pdfs[0]]["name"],
                     den="pdf_uncorr",
                     central_weights=True,
                     filename=common.data_dir
-                    + f"/TheoryCorrectionsByHelicity/PDFs/w_z_gen_dists_maxFiles_m1_{args.pdfs[0]}_pdfByHelicity_skimmed.hdf5",
+                    + f"/TheoryCorrections/ByHelicity/PDFs/w_z_gen_dists_maxFiles_m1_{pdfs[0]}_pdfByHelicity_skimmed.hdf5",
                 )
             )
 
@@ -570,10 +570,10 @@ def make_theory_helpers(
 
 def make_qcd_uncertainty_helper_by_helicity(
     is_z=False,
-    filename=f"{common.data_dir}/angularCoefficients/w_z_moments.hdf5",
+    filename=f"{common.data_dir}/angularCoefficients/w_z_helicity_xsecs.hdf5",
     rebin_ptVgen=common.ptV_binning,
     rebin_absYVgen=False,
-    rebin_massVgen=True,
+    rebin_massVgen=False,
     return_tensor=True,
 ):
 
@@ -701,7 +701,7 @@ def make_pdfs_uncertainties_helper_by_helicity(
 ):
     pdf_file_template = (
         common.data_dir
-        + "/TheoryCorrectionsByHelicity/PDFs/w_z_gen_dists_maxFiles_m1_{pdf}_pdfByHelicity_skimmed.hdf5"
+        + "/TheoryCorrections/ByHelicity/PDFs/w_z_gen_dists_maxFiles_m1_{pdf}_pdfByHelicity_skimmed.hdf5"
     )
     pdf_helpers = {}
     for pdf in pdfs:
@@ -725,6 +725,32 @@ def make_pdfs_uncertainties_helper_by_helicity(
     return pdf_helpers
 
 
+def make_pdfs_from_corrs_uncertainties_helper_by_helicity(
+    proc,
+    pdfs_from_corrs,
+    return_tensor=True,
+):
+    pdf_file_template = (
+        common.data_dir
+        + "/TheoryCorrections/ByHelicity/PDFsFromCorrs/w_z_gen_dists_{pdf}_maxFiles_m1_skimmed.hdf5"
+    )
+    pdf_helpers = {}
+    for pdf in pdfs_from_corrs:
+        logger.debug(f"Making PDF uncertainty helper by helicity for theory corr {pdf}")
+        pdf_helper = make_uncertainty_helper_by_helicity(
+            proc=proc,
+            nom=pdf,
+            den="pdf_uncorr",
+            central_weights=False,
+            var_ax_name="vars",
+            filename=pdf_file_template.format(pdf=pdf),
+            return_tensor=return_tensor,
+        )
+        if pdf_helper is not None:
+            pdf_helpers[pdf] = pdf_helper
+    return pdf_helpers
+
+
 def make_alphaS_uncertainties_helper_by_helicity(
     proc,
     as_vars,
@@ -732,18 +758,19 @@ def make_alphaS_uncertainties_helper_by_helicity(
 ):
     alphas_file_template = (
         common.data_dir
-        + "/TheoryCorrectionsByHelicity/AlphaS/w_z_gen_dists_{as_var}_maxFiles_m1_skimmed.hdf5"
+        + "/TheoryCorrections/ByHelicity/AlphaS/w_z_gen_dists_{as_var}_maxFiles_m1_skimmed.hdf5"
     )
     as_helpers = {}
     for as_var in as_vars:
         logger.debug(
             f"Making alphaS uncertainty helper by helicity for theory corr {as_var}"
         )
+        fname = alphas_file_template.format(as_var=as_var)
         as_helper = make_uncertainty_helper_by_helicity(
             proc=proc,
             nom=as_var,
             den="theory_uncorr",
-            filename=alphas_file_template.format(as_var=as_var),
+            filename=fname,
             var_ax_name="vars",
             return_tensor=return_tensor,
         )
@@ -756,7 +783,7 @@ def make_uncertainty_helper_by_helicity(
     proc,
     nom,
     den,
-    filename=f"{common.data_dir}/angularCoefficients/w_z_gen_dists_maxFiles_m1_alphaSunfoldingBinning_helicity.hdf5",
+    filename,
     filename_den=None,
     central_weights=False,
     var_ax_name="pdfVar",
@@ -769,22 +796,32 @@ def make_uncertainty_helper_by_helicity(
     if filename_den is None:
         filename_den = filename
 
-    # load helicity cross sections from file
+    # load helicity cross sections from file #TODO: include DYJetsToMuMuMass10to50
     proc_map = {
-        "Z": ("ZmumuPostVFP",),
-        "W": ("WplusmunuPostVFP", "WminusmunuPostVFP"),
+        "Z": ("Zmumu",),
+        "W": ("Wmunu",),
     }
 
     def _collect_hist(hist_name, filename):
         hist_key = f"nominal_gen_{hist_name}"
         hists = []
-        for process in proc_map.get(proc, ()):
-            with h5py.File(filename, "r") as h5file:
+        if not os.path.exists(filename):
+            logger.warning(
+                f"File {filename} does not exist. Not creating histogram of variations by helicities."
+            )
+            return None
+        with h5py.File(filename, "r") as h5file:
+            for process in proc_map.get(proc, ()):
                 results = input_tools.load_results_h5py(h5file)
-                outputs = results[process]["output"]
+                if process not in results.keys():
+                    logger.warning(
+                        f"Did not find key for process {process} in {filename}. Not creating histogram of variations by helicities for process {process} and variation {nom}."
+                    )
+                    return None
+                outputs = results[process].get("output", {})
                 if hist_key not in outputs:
                     logger.warning(
-                        f"Did not find {hist_key} in {filename}. Not creating histogram of PDF variations by helicities for this set."
+                        f"Did not find {hist_key} in {filename}. Not creating histogram of variations by helicities for process {process} and variation {nom}."
                     )
                     return None
                 hists.append(outputs[hist_key].get())

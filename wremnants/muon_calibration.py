@@ -1490,7 +1490,7 @@ def transport_smearing_weights_to_reco(
                 hist_gensmear = proc_hists[histname].get()
                 reco_histname = "nominal_" + histname[: -len("_gaus")]
                 hist_reco = hist.Hist(
-                    *hist_gensmear.axes, storage=hist_gensmear._storage_type()
+                    *hist_gensmear.axes, storage=hist_gensmear.storage_type()
                 )
 
                 bin_ratio = hh.divideHists(hist_gensmear, nominal_gensmear)
@@ -1655,7 +1655,7 @@ def make_pixel_multiplicity_helpers(
         axis_data_mc,
         axis_nontrig_trig,
         *hNValidPixelHitsTrig_data.axes,
-        storage=hNValidPixelHitsTrig_data._storage_type(),
+        storage=hNValidPixelHitsTrig_data.storage_type(),
     )
 
     hdists[

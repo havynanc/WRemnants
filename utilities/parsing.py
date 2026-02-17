@@ -153,7 +153,14 @@ def common_parser(analysis_label=""):
         nargs="*",
         help="Exclude processes matched by group name or (subset) of name",
         default=[],
-    )  # no need to exclude QCD MC here, histograms can always be made, they are fast and light, so they are always available for tests
+    )
+    parser.add_argument(
+        "--auxiliaryProcs",
+        type=str,
+        nargs="*",
+        help="Specify additional processes that are excluded by default (Those with 'auxiliary=True' in the datasetDict)",
+        default=[],
+    )
     parser.add_argument(
         "-p", "--postfix", type=str, help="Postfix for output file name", default=None
     )
@@ -168,9 +175,9 @@ def common_parser(analysis_label=""):
         type=str,
         action=NoneFilterAction,
         default=[
-            "scetlib_dyturbo",
-            "scetlib_dyturboCT18ZVars",
-            "scetlib_dyturboCT18Z_pdfas",
+            "scetlib_dyturbo_CT18Z_N3p0LL_N2LO",
+            "scetlib_dyturbo_CT18Z_N3p0LL_N2LO_pdfvars",
+            "scetlib_dyturbo_CT18Z_N3p0LL_N2LO_pdfas",
         ],
         choices=theory_corrections.valid_theory_corrections(),
         help="Apply corrections from indicated generator. First will be nominal correction.",
@@ -268,18 +275,7 @@ def common_parser(analysis_label=""):
         "-e",
         "--era",
         type=str,
-        choices=[
-            "2016PreVFP",
-            "2016PostVFP",
-            "2017",
-            "2017G",
-            "2017H",
-            "2018",
-            "2023_PUAVE1",
-            "2023_PUAVE2",
-            "2023_PUAVE5",
-            "2023_PUAVE10",
-        ],
+        choices=common.supported_eras,
         help="Data set to process",
         default="2016PostVFP",
     )
