@@ -273,6 +273,15 @@ all_axes = {
     "nonTrigMuons_charge0": hist.axis.Regular(
         2, -2.0, 2.0, underflow=False, overflow=False, name="nonTrigMuons_charge0"
     ),
+    "trigMuons_eta0": hist.axis.Regular(
+        int(args.eta[0]), args.eta[1], args.eta[2], name="trigMuons_eta0"
+    ),
+    "trigMuons_pt0": hist.axis.Regular(
+        int(args.pt[0]), args.pt[1], args.pt[2], name="trigMuons_pt0"
+    ),
+    "trigMuons_charge0": hist.axis.Regular(
+        2, -2.0, 2.0, underflow=False, overflow=False, name="trigMuons_charge0"
+    ),
 }
 
 auxiliary_gen_axes = [
@@ -1459,6 +1468,7 @@ if not args.noScaleToData:
     scale_to_data(resultdict)
     aggregate_groups(datasets, resultdict, args.aggregateGroups)
 
+print('REACHED THIS PART')
 write_analysis_output(
     resultdict, f"{os.path.basename(__file__).replace('py', 'hdf5')}", args
 )
