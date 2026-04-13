@@ -75,6 +75,11 @@ def make_subparsers(parser):
         default=None,
         help="Scale yields of histogram with cross sections variations for theory agnostic analysis with POIs as NOIs. Can be used together with --priorNormXsec",
     )
+    parser.add_argument(
+        "--noClosureSysts",
+        action="store_true",
+        help="exclude muon momentum calibration closure systs (relevant when building Z events without referencing AeM from JPsi)"
+    )
 
     if "theoryAgnostic" in subparserName:
         if subparserName == "theoryAgnosticNormVar":
@@ -2591,22 +2596,22 @@ def setup(
                 newDecorrAxesNames=[f"{decorr_syst_var}_"],
             ),
         )
-
-        datagroups.addSystematic(
-            "muonScaleClosSyst_responseWeights",
-            name="muonScaleClosSyst_responseWeightsDecorr",
-            processes=["single_v_samples"],
-            groups=["scaleClosCrctn", "muonCalibration", "experiment", "expNoLumi"],
-            baseName="ScaleClos_correction_",
-            systAxes=["unc", f"{decorr_syst_var}_", "downUpVar"],
-            passToFakes=passSystToFakes,
-            actionRequiresNomi=True,
-            action=syst_tools.decorrelateByAxes,
-            actionArgs=dict(
-                axesToDecorrNames=[decorr_syst_var],
-                newDecorrAxesNames=[f"{decorr_syst_var}_"],
-            ),
-        )
+        if not args.noClosureSysts:
+            datagroups.addSystematic(
+                "muonScaleClosSyst_responseWeights",
+                name="muonScaleClosSyst_responseWeightsDecorr",
+                processes=["single_v_samples"],
+                groups=["scaleClosCrctn", "muonCalibration", "experiment", "expNoLumi"],
+                baseName="ScaleClos_correction_",
+                systAxes=["unc", f"{decorr_syst_var}_", "downUpVar"],
+                passToFakes=passSystToFakes,
+                actionRequiresNomi=True,
+                action=syst_tools.decorrelateByAxes,
+                actionArgs=dict(
+                    axesToDecorrNames=[decorr_syst_var],
+                    newDecorrAxesNames=[f"{decorr_syst_var}_"],
+                ),
+            )
     else:
         datagroups.addSystematic(
             "muonScaleSyst_responseWeights",
@@ -2617,14 +2622,15 @@ def setup(
             passToFakes=passSystToFakes,
             scale=args.calibrationStatScaling,
         )
-        datagroups.addSystematic(
-            "muonScaleClosSyst_responseWeights",
-            processes=["single_v_samples"],
-            groups=["scaleClosCrctn", "muonCalibration", "experiment", "expNoLumi"],
-            baseName="ScaleClos_correction_",
-            systAxes=["unc", "downUpVar"],
-            passToFakes=passSystToFakes,
-        )
+        if not args.noClosureSysts:
+            datagroups.addSystematic(
+                "muonScaleClosSyst_responseWeights",
+                processes=["single_v_samples"],
+                groups=["scaleClosCrctn", "muonCalibration", "experiment", "expNoLumi"],
+                baseName="ScaleClos_correction_",
+                systAxes=["unc", "downUpVar"],
+                passToFakes=passSystToFakes,
+            )
 
     mzerr = 2.1e-3
     mz0 = 91.18
@@ -2636,25 +2642,26 @@ def setup(
     nomvarM = common.correlated_variation_base_size["M"]
     scaleM = adhocM / nomvarM
 
-    datagroups.addSystematic(
-        "muonScaleClosASyst_responseWeights",
-        processes=["single_v_samples"],
-        groups=["scaleClosACrctn", "muonCalibration", "experiment", "expNoLumi"],
-        baseName="ScaleClosA_correction_",
-        systAxes=["unc", "downUpVar"],
-        passToFakes=passSystToFakes,
-        scale=scaleA,
-    )
-    if abs(scaleM) > 0.0:
+    if not args.noClosureSysts:
         datagroups.addSystematic(
-            "muonScaleClosMSyst_responseWeights",
+            "muonScaleClosASyst_responseWeights",
             processes=["single_v_samples"],
-            groups=["scaleClosMCrctn", "muonCalibration", "experiment", "expNoLumi"],
-            baseName="ScaleClosM_correction_",
+            groups=["scaleClosACrctn", "muonCalibration", "experiment", "expNoLumi"],
+            baseName="ScaleClosA_correction_",
             systAxes=["unc", "downUpVar"],
             passToFakes=passSystToFakes,
-            scale=scaleM,
+            scale=scaleA,
         )
+        if abs(scaleM) > 0.0:
+            datagroups.addSystematic(
+                "muonScaleClosMSyst_responseWeights",
+                processes=["single_v_samples"],
+                groups=["scaleClosMCrctn", "muonCalibration", "experiment", "expNoLumi"],
+                baseName="ScaleClosM_correction_",
+                systAxes=["unc", "downUpVar"],
+                passToFakes=passSystToFakes,
+                scale=scaleM,
+            )
     if not datagroups.args_from_metadata("noSmearing"):
         if (
             not dilepton
@@ -2756,19 +2763,19 @@ def setup(
             action=syst_tools.decorrelateByAxes,
             actionArgs=dict(axesToDecorrNames=["run"], newDecorrAxesNames=["run_"]),
         )
-
-        datagroups.addSystematic(
-            "muonScaleClosSyst_responseWeights",
-            name="muonScaleClosSyst_responseWeightsDecorr",
-            processes=["single_v_samples"],
-            groups=["scaleClosCrctn", "muonCalibration", "experiment", "expNoLumi"],
-            baseName="ScaleClos_correction_",
-            systAxes=["unc", "run_", "downUpVar"],
-            passToFakes=passSystToFakes,
-            actionRequiresNomi=True,
-            action=syst_tools.decorrelateByAxes,
-            actionArgs=dict(axesToDecorrNames=["run"], newDecorrAxesNames=["run_"]),
-        )
+        if not args.noClosureSysts:
+            datagroups.addSystematic(
+                "muonScaleClosSyst_responseWeights",
+                name="muonScaleClosSyst_responseWeightsDecorr",
+                processes=["single_v_samples"],
+                groups=["scaleClosCrctn", "muonCalibration", "experiment", "expNoLumi"],
+                baseName="ScaleClos_correction_",
+                systAxes=["unc", "run_", "downUpVar"],
+                passToFakes=passSystToFakes,
+                actionRequiresNomi=True,
+                action=syst_tools.decorrelateByAxes,
+                actionArgs=dict(axesToDecorrNames=["run"], newDecorrAxesNames=["run_"]),
+            )
 
         if not datagroups.args_from_metadata("noSmearing"):
             datagroups.addSystematic(

@@ -466,6 +466,17 @@ nuisance_grouping = {
         "recoil",
         "CMS_background",
     ],
+    "JZ": [
+        "Total",
+        "A",
+        "e",
+        "M",
+        "stat",
+        "binByBinStat",
+        "theory",
+        "background_JPsi",
+        "jpsi_4d_full_spectrum",
+    ],
 }
 
 text_dict = {
@@ -688,6 +699,11 @@ impact_labels = {
     "resumTNP_gamma_cusp": "resum. TNP Γ<sub>cusp</sub>",
     "resumTNP_h_qqV": "resum. TNP Hard func.",
     "resumTNP_s": "resum. TNP Soft func.",
+    "A": "Magnetic Field (A)",
+    "e": "Energy Loss (e)",
+    "M": "Misalignment (M)",
+    "background_JPsi": "J/ψ background",
+    "jpsi_4d_full_spectrum": "J/ψ spectrum",
 }
 
 

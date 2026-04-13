@@ -80,7 +80,7 @@ def make_jpsi_crctn_helpers(args, calib_filepaths, make_uncertainty_helper=False
     tflite_file = calib_filepaths["tflite_file"]
     mc_helper = make_jpsi_crctn_helper(filepath=mc_corrfile) if mc_corrfile else None
     data_helper = (
-        make_jpsi_crctn_helper(filepath=data_corrfile) if data_corrfile else None
+        make_jpsi_crctn_helper(filepath=data_corrfile, neta=args.muScaleBins) if (data_corrfile or args.muonCorrData == "default_uncertainty_nojpsi") else None
     )
 
     if make_uncertainty_helper:
@@ -103,8 +103,9 @@ def make_jpsi_crctn_helpers(args, calib_filepaths, make_uncertainty_helper=False
                 scale_A=args.scale_A,
                 scale_e=args.scale_e,
                 scale_M=args.scale_M,
+                neta=args.muScaleBins,
             )
-            if data_corrfile
+            if (data_corrfile or args.muonCorrData == "default_uncertainty_nojpsi")
             else None
         )
 
@@ -493,22 +494,27 @@ def make_smearing_grad_helper(
     return smearinggradhelper
 
 
-def make_jpsi_crctn_helper(filepath):
-    f = uproot.open(filepath)
+def make_jpsi_crctn_helper(filepath, neta=None):
 
-    # TODO: convert variable axis to regular if the bin width is uniform
-    A, e, M = [x.to_hist() for x in [f["A"], f["e"], f["M"]]]
+    axis_param = hist.axis.Regular(3, 0, 3, underflow=False, overflow=False, name="param")
 
     # TODO: make this into a function in utilities/boostHistHelpers
-    if (A.axes != e.axes) or (e.axes != M.axes):
-        raise RuntimeError("A, e, M histograms have different axes!")
+    if filepath is not None:
+        f = uproot.open(filepath)
+        # TODO: convert variable axis to regular if the bin width is uniform
+        A, e, M = [x.to_hist() for x in [f["A"], f["e"], f["M"]]]
+        if (A.axes != e.axes) or (e.axes != M.axes):
+            raise RuntimeError("A, e, M histograms have different axes!")
+        axis_eta = (A.axes)[0] # unpack tuple of one element
     else:
-        axis_param = hist.axis.Regular(
-            3, 0, 3, underflow=False, overflow=False, name="param"
-        )
-        hist_comb = hist.Hist(*A.axes, axis_param, storage=hist.storage.Double())
-        # hist_comb.view()[...] = np.stack([x.values() for x in [A, e, M]], axis=-1)
-        hist_comb.view()[...] = 0 #maybe just values if variances actually matters for this hist
+        if neta is None:
+            raise ValueError(
+                "Must specify neta (--muScaleBins) when not providing an input file"
+            )
+        axis_eta = hist.axis.Regular(neta, -2.4, 2.4, name='xaxis', label="#eta")
+
+    hist_comb = hist.Hist(axis_eta, axis_param, storage=hist.storage.Double())
+    hist_comb.view()[...] = 0 if filepath is None else np.stack([x.values() for x in [A, e, M]], axis=-1)
 
     hist_comb_cpp = narf.hist_to_pyroot_boost(hist_comb, tensor_rank=1)
     jpsi_crctn_helper = ROOT.wrem.JpsiCorrectionsRVecHelper[
@@ -524,39 +530,49 @@ def make_jpsi_crctn_unc_helper(
     scale_M=1.0,
     isW=True,
     scale_var_method="smearingWeightsSplines",
+    neta=None
 ):
 
-    f = ROOT.TFile.Open(filepath_correction)
-    A = f.Get("A")
-    e = f.Get("e")
-    M = f.Get("M")
-    cov = f.Get("covariance_matrix")
+    if filepath_correction is not None:
 
-    A = narf.root_to_hist(A, axis_names=["scale_eta"])
-    e = narf.root_to_hist(e, axis_names=["scale_eta"])
-    M = narf.root_to_hist(M, axis_names=["scale_eta"])
-    cov = narf.root_to_hist(cov)
+        f = ROOT.TFile.Open(filepath_correction)
+        A = f.Get("A")
+        e = f.Get("e")
+        M = f.Get("M")
+        cov = f.Get("covariance_matrix")
 
-    f.Close()
+        A = narf.root_to_hist(A, axis_names=["scale_eta"])
+        e = narf.root_to_hist(e, axis_names=["scale_eta"])
+        M = narf.root_to_hist(M, axis_names=["scale_eta"])
+        cov = narf.root_to_hist(cov)
+        cov = cov.values()
 
-    axis_eta = A.axes["scale_eta"]
-    neta = axis_eta.size
+        f.Close()
 
-    cov = cov.values()
+        axis_eta = A.axes["scale_eta"]
+        neta = axis_eta.size
+
+    else:
+
+        if neta is None:
+            raise ValueError(
+                "Must specify neta (--muScaleBins) when not providing an input file"
+            )
+        axis_eta = hist.axis.Regular(neta, -2.4, 2.4, name='scale_eta')
+        # order of params in this case is A0, e0, M0, A1, e1, M1, ...
+        cov = np.diag(np.tile([1e-3, 1e-2, 1e-4, 1], neta))**2 #dummy 1 at the end for compatibility with unused syst
+  
     nparmscov = cov.shape[0] // neta
     n_scale_params = 3
     nvars = neta * n_scale_params
 
-    variances_ref = np.stack([A.variances(), e.variances(), M.variances()], axis=-1)
-    variances = np.reshape(np.diag(cov), (neta, nparmscov))[:, :n_scale_params]
-
-    if not np.all(np.isclose(variances, variances_ref, atol=0.0)):
-        raise ValueError(
-            "Covariance matrix is not consistent with parameter uncertainties or parameters are not in the expected order."
-        )
-
-    #redefine things to manually hack in prefit uncertainties instead of results from jpsi fit
-    cov = np.diag(np.tile([1e-3, 1e-2, 1e-4, 1], neta))**2 #dummy 1 at the end because nparmscov=4 for some reason
+    if filepath_correction is not None:
+        variances_ref = np.stack([A.variances(), e.variances(), M.variances()], axis=-1)
+        variances = np.reshape(np.diag(cov), (neta, nparmscov))[:, :n_scale_params]
+        if not np.all(np.isclose(variances, variances_ref, atol=0.0)):
+            raise ValueError(
+                "Covariance matrix is not consistent with parameter uncertainties or parameters are not in the expected order."
+            )
 
     cov = np.reshape(cov, (neta, nparmscov, neta, nparmscov))
     cov = cov[:, :n_scale_params, :, :n_scale_params]
@@ -568,9 +584,12 @@ def make_jpsi_crctn_unc_helper(
 
     cov = np.reshape(cov, (nvars, nvars))
 
-    e, v = np.linalg.eigh(cov)
-    var_mat = np.sqrt(e[None, :]) * v
-    var_mat = np.reshape(var_mat, (neta, n_scale_params, nvars))
+    if filepath_correction is not None:
+        e, v = np.linalg.eigh(cov)
+        var_mat = np.sqrt(e[None, :]) * v
+        var_mat = np.reshape(var_mat, (neta, n_scale_params, nvars))
+    else:
+        var_mat = np.reshape(np.sqrt(cov), (neta, n_scale_params, nvars))
 
     axis_scale_params = hist.axis.Integer(
         0, n_scale_params, underflow=False, overflow=False, name="scale_params"

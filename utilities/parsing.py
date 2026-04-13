@@ -407,14 +407,14 @@ def common_parser(analysis_label=""):
             "--muonCorrData",
             type=str,
             default="lbl_massfit",
-            choices=["none", "trackfit_only", "lbl", "massfit", "lbl_massfit"],
+            choices=["none", "trackfit_only", "lbl", "massfit", "lbl_massfit", "default_uncertainty_nojpsi"],
             help="Type of correction to apply to the muons in data",
         )
         parser.add_argument(
             "--muScaleBins",
             type=int,
-            default=1,
-            help="Number of bins for muon scale uncertainty",
+            default=None,
+            help="Number of bins for muon scale uncertainty (only needed when using --muonCorrData default_uncertainty_nojpsi, otherwise is read from hists)",
         )
         parser.add_argument(
             "--muonScaleVariation",
