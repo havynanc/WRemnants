@@ -1135,10 +1135,22 @@ def main():
                 **buffers,
             ).eval()
         if ms_idx >= 0:
+            # Report the table actually baked in, not a hardcoded one:
+            # the scheme comes from PreprocStats and differs between
+            # muon and kpi models.
+            from arrow_shard_loader import (
+                DEFAULT_SOURCE_SCHEME,
+                resolve_source_codes,
+            )
+
+            _codes = resolve_source_codes(ms_scheme or DEFAULT_SOURCE_SCHEME)
+            _table = ", ".join(
+                f"{raw} -> {code:+g}" for raw, code in sorted(_codes.items())
+            )
             print(
                 f"muon_source remap baked in: c_raw[:, {ms_idx}] "
-                f"will be mapped {{1, 15, 443}} -> {{-1, 0, +1}} "
-                f"inside the graph"
+                f"scheme={ms_scheme or DEFAULT_SOURCE_SCHEME!r} "
+                f"({_table}); any other code -> 0"
             )
         # Eager smoke check at a non-trivial (B, N_var). Both dims
         # must be > 1 to avoid torch.export specializing them.
