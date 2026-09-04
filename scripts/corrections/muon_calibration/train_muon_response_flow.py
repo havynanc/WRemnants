@@ -84,6 +84,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
+# The ``muon_source`` code tables live in ``arrow_shard_loader``, the
+# single source of truth shared by this trainer, the shift+smear
+# trainer and the ONNX export. Safe at module level: arrow_shard_loader
+# has no module-level import back into this file (it pulls
+# ``PreprocStats`` lazily, inside the functions that need it).
+from arrow_shard_loader import (
+    DEFAULT_SOURCE_SCHEME,
+    SOURCE_SCHEMES,
+    _muon_source_to_compact,
+)
+
 
 def parse_args():
     p = argparse.ArgumentParser(
@@ -951,6 +962,7 @@ def _load_arrow_shards(
     """
     import pyarrow as pa
     import pyarrow.ipc as ipc
+
     from arrow_shard_loader import split_batch_range
 
     _MAGIC = b"ARROW1"
@@ -1211,23 +1223,14 @@ def compute_targets_and_conditioning(
     return target, cond_raw
 
 
-# Per-class mapping for the per-muon ``muon_source`` integer:
-#   1   -> -1   (W/Z prompt muon)
-#   15  ->  0   (W/Z secondary muon from a τ decay)
-#   443 -> +1   (J/ψ -- PDG id sentinel; calibration ntuples have no
-#                ``Muon_genPartFlav`` analogue)
-# Unrecognised values map to NaN to surface bugs loudly.
-_MUON_SOURCE_CODES = {1: -1.0, 15: 0.0, 443: 1.0}
-
-
-def _muon_source_to_compact(ms):
-    """Map raw ``muon_source`` integers to ``float32`` codes in
-    ``{-1, 0, +1}``; see :data:`_MUON_SOURCE_CODES`."""
-    ms_arr = np.asarray(ms)
-    out = np.full(ms_arr.shape, np.nan, dtype=np.float32)
-    for raw, code in _MUON_SOURCE_CODES.items():
-        out[ms_arr == raw] = code
-    return out
+# ``muon_source`` encodings are resolved from the shared registry (see
+# the import at the top of this file). ``"muon"`` is the historical
+# 3-class encoding {1: -1, 15: 0, 443: +1}; ``"kpi"`` is the 2-class
+# D0 -> K π species encoding {321: -1, 211: +1}. Unrecognised values map
+# to NaN to surface bugs loudly.
+#
+# Back-compat alias for the historical table.
+_MUON_SOURCE_CODES = SOURCE_SCHEMES[DEFAULT_SOURCE_SCHEME]
 
 
 # Conditioning features that should bypass the per-feature ``(x-μ)/σ``
@@ -1253,8 +1256,18 @@ class PreprocStats:
     cond_mean: List[float]
     cond_std: List[float]
 
+    # Which ``muon_source`` encoding the model was trained against (a
+    # key of ``arrow_shard_loader.SOURCE_SCHEMES``). Defaulted so that
+    # ``PreprocStats(**json.load(old_preproc))`` still works — every
+    # checkpoint written before this field existed used "muon".
+    source_scheme: str = DEFAULT_SOURCE_SCHEME
 
-def build_preproc(target: np.ndarray, cond_raw: dict) -> PreprocStats:
+
+def build_preproc(
+    target: np.ndarray,
+    cond_raw: dict,
+    source_scheme: str = DEFAULT_SOURCE_SCHEME,
+) -> PreprocStats:
     target_names = ["r_kappa", "dlambda", "dphi"]
     target_mean = target.mean(axis=0).tolist()
     target_std = target.std(axis=0).tolist()
@@ -1288,6 +1301,7 @@ def build_preproc(target: np.ndarray, cond_raw: dict) -> PreprocStats:
         cond_names=cond_names,
         cond_mean=cond_mean,
         cond_std=cond_std,
+        source_scheme=str(source_scheme),
     )
 
 

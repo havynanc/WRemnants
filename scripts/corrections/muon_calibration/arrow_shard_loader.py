@@ -66,20 +66,63 @@ _COND_NAMES = (
 _WEIGHT_MODES = ("abs", "keep", "drop")
 
 
-# Per-class mapping for the per-muon ``muon_source`` integer (mirrors
-# ``train_muon_response_flow._MUON_SOURCE_CODES``):
-#   1   -> -1   (W/Z prompt)
-#   15  ->  0   (W/Z τ-decay)
-#   443 -> +1   (J/ψ sentinel)
-_MUON_SOURCE_CODES = {1: -1.0, 15: 0.0, 443: 1.0}
+# Canonical registry of ``muon_source`` encodings. THE single source of
+# truth: the trainer, ``train_muon_response_flow`` and the ONNX export
+# all resolve their code table from here, so a scheme is defined once.
+#
+#   "muon" -- the historical 3-class muon encoding:
+#       1   -> -1   (W/Z prompt)
+#       15  ->  0   (W/Z τ-decay)
+#       443 -> +1   (J/ψ sentinel)
+#
+#   "kpi"  -- 2-class D0 -> K π daughter encoding, keyed on |PDG id|:
+#       321 -> -1   (K^±)
+#       211 -> +1   (π^±)
+#     Here the column separates *species* (and hence mass, dE/dx, decay
+#     length, hadronic cross section) rather than decay source, and the
+#     three muon classes are not used at all. The ±1 encoding (rather
+#     than 0/+1) keeps both species with equal leverage on the first
+#     trunk layer, and leaves 0 free as the "neither" value that an
+#     unrecognised code produces on the deployment side — see
+#     ``_remap_muon_source_inplace`` in shift_smear_reweight_export.
+SOURCE_SCHEMES = {
+    "muon": {1: -1.0, 15: 0.0, 443: 1.0},
+    "kpi": {321: -1.0, 211: 1.0},
+}
+DEFAULT_SOURCE_SCHEME = "muon"
+
+# Back-compat alias for the historical table.
+_MUON_SOURCE_CODES = SOURCE_SCHEMES[DEFAULT_SOURCE_SCHEME]
 
 
-def _muon_source_to_compact(ms: np.ndarray) -> np.ndarray:
-    """Map raw ``muon_source`` int codes to ``float32`` values in
-    ``{-1, 0, +1}``. Unknown values map to NaN."""
+def resolve_source_codes(scheme):
+    """Return the raw-int -> compact-float table for ``scheme``.
+
+    ``scheme`` may be a registry key (``"muon"``, ``"kpi"``) or an
+    explicit mapping, which is passed through after validation. Raises
+    on an unknown key so a typo fails loudly rather than silently
+    training against the wrong encoding.
+    """
+    if isinstance(scheme, dict):
+        return {int(k): float(v) for k, v in scheme.items()}
+    if scheme not in SOURCE_SCHEMES:
+        raise ValueError(
+            f"unknown source scheme {scheme!r}; "
+            f"expected one of {sorted(SOURCE_SCHEMES)}"
+        )
+    return SOURCE_SCHEMES[scheme]
+
+
+def _muon_source_to_compact(ms: np.ndarray, scheme=DEFAULT_SOURCE_SCHEME):
+    """Map raw ``muon_source`` int codes to their compact ``float32``
+    values under ``scheme``. Unknown values map to NaN, which the
+    downstream finite-ness filter drops (and which surfaces a wrong
+    scheme choice as an empty training set rather than silent
+    mislabelling)."""
+    codes = resolve_source_codes(scheme)
     ms_arr = np.asarray(ms)
     out = np.full(ms_arr.shape, np.nan, dtype=np.float32)
-    for raw, code in _MUON_SOURCE_CODES.items():
+    for raw, code in codes.items():
         out[ms_arr == raw] = code
     return out
 
@@ -458,9 +501,13 @@ def count_rows(shard_files: Sequence[str]) -> List[int]:
 # ---------------------------------------------------------------------------
 
 
-def _per_batch_target_cond(cols: dict):
+def _per_batch_target_cond(cols: dict, source_scheme=DEFAULT_SOURCE_SCHEME):
     """Return (target [N, 3], cond [N, n_cond], weight [N]) in fp32
     from the raw columns of one Arrow record batch.
+
+    ``source_scheme`` selects the ``muon_source`` encoding (see
+    :data:`SOURCE_SCHEMES`); it must match the scheme the shards were
+    written with, or every row maps to NaN and is filtered out.
 
     Mirrors :func:`compute_targets_and_conditioning` exactly:
 
@@ -503,7 +550,7 @@ def _per_batch_target_cond(cols: dict):
             # raw {1, 15, 443} integers; the linear standardisation
             # would otherwise collapse prompt/τ together and stretch
             # J/ψ far out.
-            _muon_source_to_compact(muon_source),
+            _muon_source_to_compact(muon_source, source_scheme),
         ],
         axis=1,
     ).astype(np.float32)
@@ -523,15 +570,15 @@ def _read_raw_columns(batch: pa.RecordBatch) -> dict:
 
 
 def _stats_chunk(arg):
-    """Worker: read a (shard, [batch_start, batch_stop), weight_mode)
-    slice and return partial (n_kept, t_sum, t_sq, c_sum, c_sq,
+    """Worker: read a (shard, [batch_start, batch_stop), weight_mode,
+    source_scheme) slice and return partial (n_kept, t_sum, t_sq, c_sum, c_sq,
     w_sum, abs_w_sum, n_filt). ``abs_w_sum`` is the sum of ``|w|``
     over the kept rows — used as the normalisation scale by the
     streaming loader regardless of weight_mode, so signed-weight
     training (``mode=keep``) doesn't divide by a near-zero mean(w)
     when positive and negative contributions cancel.
     """
-    path, batch_start, batch_stop, weight_mode = arg
+    path, batch_start, batch_stop, weight_mode, source_scheme = arg
     n_target = len(_TARGET_NAMES)
     n_cond = len(_COND_NAMES)
     t_sum = np.zeros(n_target, dtype=np.float64)
@@ -562,7 +609,7 @@ def _stats_chunk(arg):
 
         for batch in batches:
             cols = _read_raw_columns(batch)
-            target, cond, w = _per_batch_target_cond(cols)
+            target, cond, w = _per_batch_target_cond(cols, source_scheme)
             target_finite = np.isfinite(target).all(axis=1) & np.isfinite(cond).all(
                 axis=1
             )
@@ -596,8 +643,10 @@ def _enumerate_chunks(
     split: str = "train",
     val_fraction: float = DEFAULT_VAL_FRACTION,
     holdout_fraction: float = DEFAULT_HOLDOUT_FRACTION,
+    source_scheme=DEFAULT_SOURCE_SCHEME,
 ):
-    """Build a list of ``(shard, batch_start, batch_stop, weight_mode)``
+    """Build a list of ``(shard, batch_start, batch_stop, weight_mode,
+    source_scheme)``
     work items, restricted to the requested split's contiguous
     record-batch range inside each shard. File-format shards expose
     ``num_record_batches`` (cheap, footer read); stream-format shards
@@ -628,7 +677,7 @@ def _enumerate_chunks(
             continue
         for start in range(lo, hi, batches_per_chunk):
             stop = min(start + batches_per_chunk, hi)
-            out.append((path, start, stop, weight_mode))
+            out.append((path, start, stop, weight_mode, source_scheme))
     return out
 
 
@@ -640,6 +689,7 @@ def _compute_stats_robust(
     split: str = "train",
     val_fraction: float = DEFAULT_VAL_FRACTION,
     holdout_fraction: float = DEFAULT_HOLDOUT_FRACTION,
+    source_scheme=DEFAULT_SOURCE_SCHEME,
 ):
     """Sample-based robust location + scale: ``median`` for the
     location, ``1.4826 * MAD`` for the scale. Reads up to
@@ -687,7 +737,7 @@ def _compute_stats_robust(
                 if n_total >= sample_rows:
                     break
                 cols = _read_raw_columns(batch)
-                target, cond, w = _per_batch_target_cond(cols)
+                target, cond, w = _per_batch_target_cond(cols, source_scheme)
                 target_finite = np.isfinite(target).all(axis=1) & np.isfinite(cond).all(
                     axis=1
                 )
@@ -765,6 +815,7 @@ def _compute_stats_robust(
             cond_names=list(_COND_NAMES),
             cond_mean=c_median.tolist(),
             cond_std=c_std.tolist(),
+            source_scheme=str(source_scheme),
         ),
         abs_w_mean,
     )
@@ -783,8 +834,14 @@ def compute_stats_streaming(
     weight_mode: str = "abs",
     robust: bool = True,
     robust_sample_rows: int = 20_000_000,
+    source_scheme=DEFAULT_SOURCE_SCHEME,
 ):
     """One pass over the shards; returns ``(PreprocStats, weight_mean)``.
+
+    ``source_scheme`` selects the ``muon_source`` encoding (a key of
+    :data:`SOURCE_SCHEMES`, e.g. ``"muon"`` or ``"kpi"``) and is
+    recorded on the returned ``PreprocStats`` so the loader and the
+    ONNX export both inherit it without a second flag.
 
     Accumulates per-column ``sum`` and ``sum_of_squares`` in float64
     so a few billion fp32 rows stay numerically clean.
@@ -814,6 +871,8 @@ def compute_stats_streaming(
         )
     if split not in _SPLIT_NAMES:
         raise ValueError(f"split must be one of {_SPLIT_NAMES}, got {split!r}")
+    # Fail loudly here rather than per-worker deep in the pool.
+    resolve_source_codes(source_scheme)
     if robust:
         # Dispatch to the sample-based median + 1.4826·MAD path.
         # Tail mass (e.g. r_kappa charge-mismeasurement peak) doesn't
@@ -828,6 +887,7 @@ def compute_stats_streaming(
             split=split,
             val_fraction=val_fraction,
             holdout_fraction=holdout_fraction,
+            source_scheme=source_scheme,
         )
     if n_workers <= 0:
         n_workers = max(1, (os.cpu_count() or 1))
@@ -847,6 +907,7 @@ def compute_stats_streaming(
         split=split,
         val_fraction=val_fraction,
         holdout_fraction=holdout_fraction,
+        source_scheme=source_scheme,
     )
     if not tasks:
         raise RuntimeError("compute_stats_streaming: no record batches found")
@@ -938,6 +999,7 @@ def compute_stats_streaming(
             cond_names=list(_COND_NAMES),
             cond_mean=c_mean.tolist(),
             cond_std=c_std.tolist(),
+            source_scheme=str(source_scheme),
         ),
         float(weight_mean),
     )
@@ -1041,6 +1103,13 @@ class ArrowShardLoader(torch_data.IterableDataset):
         self.seed = int(seed)
         self.prefetch = max(0, int(prefetch))
         self.weight_mode = weight_mode
+        # The ``muon_source`` encoding is a property of the trained
+        # model, so it rides along on PreprocStats rather than being a
+        # separate constructor argument that could drift out of sync.
+        self.source_scheme = getattr(stats, "source_scheme", None) or (
+            DEFAULT_SOURCE_SCHEME
+        )
+        resolve_source_codes(self.source_scheme)
         self.num_workers_hint = max(1, int(num_workers_hint))
         self._epoch = 0
         # Per-record-batch layout. Lazily filled on the first
@@ -1357,7 +1426,7 @@ class ArrowShardLoader(torch_data.IterableDataset):
                     batches_iter = (b for i, b in enumerate(reader) if i in idx_set)
                 for batch in batches_iter:
                     cols = _read_raw_columns(batch)
-                    target, cond, w = _per_batch_target_cond(cols)
+                    target, cond, w = _per_batch_target_cond(cols, self.source_scheme)
                     n = target.shape[0]
                     if n == 0:
                         continue

@@ -88,10 +88,14 @@ class ReweightPolyheadInference(nn.Module):
         cond_mean: torch.Tensor,
         cond_std: torch.Tensor,
         muon_source_idx: int = -1,
+        source_scheme=None,
     ):
         super().__init__()
         self.polyhead = polyhead
         self.muon_source_idx = int(muon_source_idx)
+        # Recorded on PreprocStats by the trainer; picked up here so the
+        # baked-in remap always matches the encoding the model saw.
+        self.source_scheme = source_scheme
         self.register_buffer("target_mean", target_mean)
         self.register_buffer("target_std", target_std)
         self.register_buffer("cond_mean", cond_mean)
@@ -102,7 +106,9 @@ class ReweightPolyheadInference(nn.Module):
         y_raw: torch.Tensor,
         c_raw: torch.Tensor,
     ) -> torch.Tensor:
-        c_raw = _remap_muon_source_inplace(c_raw, self.muon_source_idx)
+        c_raw = _remap_muon_source_inplace(
+            c_raw, self.muon_source_idx, self.source_scheme
+        )
         y_std = (y_raw - self.target_mean) / self.target_std
         c_std = (c_raw - self.cond_mean) / self.cond_std
         return self.polyhead(y_std, c_std)
@@ -135,10 +141,14 @@ class CombinedInference(nn.Module):
         cond_mean: torch.Tensor,
         cond_std: torch.Tensor,
         muon_source_idx: int = -1,
+        source_scheme=None,
     ):
         super().__init__()
         self.polyhead = polyhead
         self.muon_source_idx = int(muon_source_idx)
+        # Recorded on PreprocStats by the trainer; picked up here so the
+        # baked-in remap always matches the encoding the model saw.
+        self.source_scheme = source_scheme
         self.register_buffer("target_mean", target_mean)
         self.register_buffer("target_std", target_std)
         self.register_buffer("cond_mean", cond_mean)
@@ -151,7 +161,9 @@ class CombinedInference(nn.Module):
         u: torch.Tensor,
         sigma: torch.Tensor,
     ) -> torch.Tensor:
-        c_raw = _remap_muon_source_inplace(c_raw, self.muon_source_idx)
+        c_raw = _remap_muon_source_inplace(
+            c_raw, self.muon_source_idx, self.source_scheme
+        )
         y_std = (y_raw - self.target_mean) / self.target_std
         c_std = (c_raw - self.cond_mean) / self.cond_std
         coefs = self.polyhead(y_std, c_std)  # [B, n_basis]
@@ -170,37 +182,68 @@ class CombinedInference(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Per-muon ``muon_source`` remap baked into the graph.
+# Per-track ``muon_source`` remap baked into the graph.
 #
-# The trainer compacts the raw integer code {1 = prompt W/Z muon,
-# 15 = secondary from a τ decay, 443 = J/ψ leg} into {-1, 0, +1}
-# before standardising (see ``arrow_shard_loader._MUON_SOURCE_CODES``).
-# We want callers (the C++ ``Muon_genPartFlav`` plumbing) to pass the
-# *raw* integer in physical units; the graph does the remap as part
-# of the preproc so there is one less convention for the C++ side to
-# track. The mapping is exclusive (each row is exactly one of 1/15/
-# 443), so ``+1 * (ms==443) - 1 * (ms==1)`` reproduces the compact
-# code without a ``where``-chain.
+# The trainer compacts a raw integer class code into a small float
+# before standardising; which table it used is recorded on
+# ``PreprocStats.source_scheme`` and resolved here from
+# ``arrow_shard_loader.SOURCE_SCHEMES``:
+#
+#   "muon" -- {1 = prompt W/Z, 15 = τ-decay, 443 = J/ψ leg} -> {-1,0,+1}
+#   "kpi"  -- {321 = K^±, 211 = π^±}                        -> {-1, +1}
+#
+# Callers (the C++ ``Muon_genPartFlav`` plumbing, or a D0 daughter-PDG
+# equivalent) pass the *raw* integer in physical units and the graph
+# does the remap as part of the preproc, so there is one less
+# convention for the C++ side to track. Each row carries exactly one
+# code, so a sum of scaled ``(ms == raw)`` indicators reproduces the
+# compact value without a ``where``-chain.
 # ---------------------------------------------------------------------------
 
 
 def _remap_muon_source_inplace(
     c_raw: torch.Tensor,
     muon_source_idx: int,
+    source_scheme=None,
 ) -> torch.Tensor:
     """Return a new tensor identical to ``c_raw`` except column
-    ``muon_source_idx`` is remapped from the raw {1, 15, 443} codes
-    to compact {-1, 0, +1} via a concat (export-friendly, no
-    in-place mutation of caller buffers)."""
+    ``muon_source_idx`` is remapped from raw integer codes to their
+    compact float values, via a concat (export-friendly, no in-place
+    mutation of caller buffers).
+
+    The table comes from ``arrow_shard_loader.SOURCE_SCHEMES`` so the
+    graph always agrees with what the trainer saw:
+
+      * ``"muon"`` -- {1: -1, 15: 0, 443: +1}, which reduces to the
+        historical ``is_jpsi - is_prompt`` expression (identical ops).
+      * ``"kpi"``  -- {321: -1, 211: +1}, i.e.
+        ``(ms == 211) - (ms == 321)``.
+
+    Codes whose compact value is exactly 0 emit no ops, so an
+    unrecognised input also lands on 0. Under ``"muon"`` that collides
+    with the tau class; under ``"kpi"`` no species maps to 0, so an
+    unrecognised code is distinguishable from both K and pi. Either
+    way the trainer maps unknown codes to NaN instead, so the deployed
+    graph is the more permissive of the two and callers must feed only
+    codes in the scheme (the C++ helpers do this with an explicit
+    pre-map).
+    """
     if muon_source_idx < 0:
         return c_raw
+    from arrow_shard_loader import DEFAULT_SOURCE_SCHEME, resolve_source_codes
+
+    codes = resolve_source_codes(source_scheme or DEFAULT_SOURCE_SCHEME)
     idx = muon_source_idx
     ms_raw = c_raw[:, idx : idx + 1]
-    is_jpsi = (ms_raw == 443).to(c_raw.dtype)
-    is_prompt = (ms_raw == 1).to(c_raw.dtype)
-    # +1 for J/ψ, -1 for prompt W/Z, 0 for τ-decay (== 15) or anything
-    # else — matches the trainer's ``_MUON_SOURCE_CODES`` table.
-    ms_compact = is_jpsi - is_prompt
+    ms_compact = None
+    for raw, code in sorted(codes.items()):
+        if code == 0.0:
+            continue
+        hit = (ms_raw == raw).to(c_raw.dtype)
+        term = hit if code == 1.0 else (-hit if code == -1.0 else code * hit)
+        ms_compact = term if ms_compact is None else ms_compact + term
+    if ms_compact is None:
+        ms_compact = torch.zeros_like(ms_raw)
     return torch.cat([c_raw[:, :idx], ms_compact, c_raw[:, idx + 1 :]], dim=1)
 
 
@@ -285,6 +328,7 @@ class CombinedInferenceMLP(nn.Module):
         shift_only: bool,
         positivity_clamp: float = _LOG_W_CLAMP,
         muon_source_idx: int = -1,
+        source_scheme=None,
     ):
         super().__init__()
         self.head = head
@@ -297,6 +341,9 @@ class CombinedInferenceMLP(nn.Module):
         # was trained without it and the remap is a no-op. Static int
         # (not a buffer) — torch.export specialises on it.
         self.muon_source_idx = int(muon_source_idx)
+        # Recorded on PreprocStats by the trainer; picked up here so the
+        # baked-in remap always matches the encoding the model saw.
+        self.source_scheme = source_scheme
         self.register_buffer("target_mean", target_mean)
         self.register_buffer("target_std", target_std)
         self.register_buffer("cond_mean", cond_mean)
@@ -327,7 +374,9 @@ class CombinedInferenceMLP(nn.Module):
         # Remap ``muon_source`` from the raw integer code (1, 15, 443)
         # to the compact {-1, 0, +1} the trainer saw. No-op if the
         # model wasn't trained with the column.
-        c_raw = _remap_muon_source_inplace(c_raw, self.muon_source_idx)
+        c_raw = _remap_muon_source_inplace(
+            c_raw, self.muon_source_idx, self.source_scheme
+        )
         # Full preproc inside the graph. y / c get mean+std (absolute
         # observables); u / σ get std-only (they're deltas / magnitudes
         # in target space, so the mean is meaningless).
@@ -798,6 +847,7 @@ def _build_wrapper(checkpoint_path):
             cond_mean=cond_mean,
             cond_std=cond_std,
             muon_source_idx=_muon_source_idx(stats),
+            source_scheme=getattr(stats, "source_scheme", None),
         ).eval()
     else:
         # Trunk-only form is polyhead-specific; mlp / mlp-factored only
@@ -1043,6 +1093,7 @@ def main():
         # Build PreprocStats-derived buffers (the polyhead wrapper
         # carries them; for mlp we have to derive them from ``stats``).
         ms_idx = _muon_source_idx(stats)
+        ms_scheme = getattr(stats, "source_scheme", None)
         if is_polyhead:
             buffers = dict(
                 target_mean=wrapper.target_mean,
@@ -1053,6 +1104,7 @@ def main():
             combined = CombinedInference(
                 polyhead=model,
                 muon_source_idx=ms_idx,
+                source_scheme=ms_scheme,
                 **buffers,
             ).eval()
         else:
@@ -1079,6 +1131,7 @@ def main():
                 is_factored=is_factored,
                 shift_only=shift_only,
                 muon_source_idx=ms_idx,
+                source_scheme=ms_scheme,
                 **buffers,
             ).eval()
         if ms_idx >= 0:

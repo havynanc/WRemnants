@@ -9,6 +9,15 @@ sharding step.
                  correction Mu{plus,minus}cor_{pt,eta,phi}; each event
                  row carries an RVec of length 2, one per muon.
 
+  --source d0    D0 -> K pi daughters from the D* truth-matched
+                 ALCARECO ntuples. Each event row carries an RVec of
+                 length 2: the kaon first, the pion second, tagged
+                 ``muon_source = {321, 211}`` (|PDG id|) for the
+                 ``kpi`` source scheme. Muon-specific machinery (LBL
+                 corrections, pileup/vertex weights, the resolution-
+                 matching smearing helper) does not apply and is not
+                 run; ``--smearing`` is rejected in this mode.
+
   --source wz    Standard NanoAOD W/Z MC, enumerated via
                  ``wremnants.production.datasets.dataset_tools.getDatasets``
                  (filtered to processes in
@@ -54,6 +63,17 @@ Outputs
   --source jpsi  --output FILE                Single .root file.
   --source wz    --output-dir DIR             One .root per W/Z dataset
                                               (dir/<dataset>.root).
+  --source d0    --d0-output-dir DIR          One .root per D0 dataset
+                                              (dir/<dataset>.root).
+
+The d0 snapshots are NOT picked up by the bare end-to-end invocation
+and are not auto-detected alongside jpsi/wz snapshots: they carry the
+``kpi`` muon_source codes {321, 211} rather than the muon codes
+{1, 15, 443}, and a single trained model resolves exactly one scheme
+(see ``arrow_shard_loader.SOURCE_SCHEMES``). Shard them separately::
+
+    --shard-only --inputs flow_training_snapshot_d0/*.root \
+                 --shard-output-dir shards_d0
 
 The sharding pass is not invoked from this script when running in
 either snapshot mode. After producing one or more snapshots, invoke
@@ -120,6 +140,18 @@ def _write_source_meta(snapshot_path: str, entries: List[dict]) -> None:
 #      matters and the ``XRootD.client``-first rule below is now
 #      safe.
 
+
+# D0 -> K pi MC. Local POSIX productions; each entry is one dataset
+# and gets its own ``source_id`` (base + index) and output file.
+DEFAULT_D0_INPUT_PATHS = [
+    "/scratch/submit/cms/emanca/DStarTransientCVHTruth_v1",
+    "/scratch/submit/cms/emanca/DStarTransientCVHTruth_prod500M_v1",
+]
+
+# Base ``source_id`` for the D0 datasets. Existing stamps are 0/1
+# (J/psi Pt8toInf / Pt0to8) and 100+ (W/Z, incremented by getDatasets()
+# order), so 200 leaves headroom for both without collision.
+D0_SOURCE_ID_BASE = 200
 
 DEFAULT_JPSI_INPUT_PATHS = [
     # Pt8toInf samples -> source_id = base (e.g. 0).
@@ -223,10 +255,14 @@ def parse_args():
     mode = p.add_mutually_exclusive_group(required=False)
     mode.add_argument(
         "--source",
-        choices=["jpsi", "wz"],
+        choices=["jpsi", "wz", "d0"],
         help="Snapshot mode: 'jpsi' reads custom J/psi ideal-geometry "
         "ntuples (--input-paths); 'wz' enumerates W/Z MC datasets via "
-        "wremnants getDatasets() (--data-path, --era). If neither this "
+        "wremnants getDatasets() (--data-path, --era); 'd0' reads the "
+        "D* truth-matched ALCARECO ntuples and emits the D0 -> K pi "
+        "daughters (--d0-input-paths). 'd0' is opt-in only -- it is "
+        "excluded from the bare end-to-end pipeline because its "
+        "muon_source codes belong to the 'kpi' scheme. If neither this "
         "nor --shard-only is given, the script runs the full pipeline "
         "end-to-end (jpsi snapshot, wz snapshot, then shard) by "
         "re-invoking itself once per step in a subprocess (avoids the "
@@ -311,6 +347,38 @@ def parse_args():
         "on it.",
     )
 
+    # ---- D0-source inputs -------------------------------------------
+    p.add_argument(
+        "--d0-input-paths",
+        nargs="+",
+        default=DEFAULT_D0_INPUT_PATHS,
+        metavar="PATH",
+        help="(--source d0 only) One entry per D0 dataset: a "
+        "directory (searched recursively for .root), a glob, or an "
+        "explicit .root file. Each entry is snapshotted separately "
+        "and stamped with its own source_id (base + index).",
+    )
+    p.add_argument(
+        "--d0-tree",
+        default="dstToD0PiMCTruthProducer/MatchedCandidates",
+        help="(--source d0 only) Tree path inside the D0 MC files. "
+        "Must carry the CVH_{K,pi}_* reco and truth_{K,pi}_* gen "
+        "branches.",
+    )
+    p.add_argument(
+        "--d0-max-files",
+        type=int,
+        default=-1,
+        help="(--source d0 only) Cap on input .root files per "
+        "dataset after resolution. -1 uses all.",
+    )
+    p.add_argument(
+        "--d0-eta-max",
+        type=float,
+        default=2.5,
+        help="(--source d0 only) |gen eta| cut, applied to both " "daughters.",
+    )
+
     # ---- W/Z calibration knobs (forwarded to define_corrected_muons) -
     p.add_argument(
         "--muonCorrMC",
@@ -338,13 +406,16 @@ def parse_args():
     p.add_argument(
         "--smearing",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help="Apply the data/MC resolution-matching smearing helper "
         "to the reco muons of *both* the J/ψ and W/Z snapshots. On by "
-        "default so the two samples are directly comparable in the "
-        "target distributions (same LBL + cvhideal calibration chain, "
-        "same smearing). Pass --no-smearing to drop the smearing on "
-        "both paths.",
+        "default there so the two samples are directly comparable in "
+        "the target distributions (same LBL + cvhideal calibration "
+        "chain, same smearing). Pass --no-smearing to drop the "
+        "smearing on both paths. Not applicable to --source d0: the "
+        "helper is built from muon resolution maps and passing "
+        "--smearing with --source d0 is an error (the effective "
+        "default there is --no-smearing).",
     )
 
     # ---- source_id stamp ------------------------------------------
@@ -355,9 +426,12 @@ def parse_args():
         help="Integer stamped into the ``source_id`` column. "
         "--source jpsi: stamps every row with this value. "
         "--source wz: this is the base; dataset i (in getDatasets() "
-        "order) gets ``source_id = base + i``. None auto-selects: 0 "
-        "for --source jpsi, 100 for --source wz (avoids the default "
-        "J/psi vs W/Z collision in an end-to-end run).",
+        "order) gets ``source_id = base + i``. "
+        "--source d0: base; dataset i (in --d0-input-paths order) "
+        "gets ``source_id = base + i``, tagging the *dataset* only -- "
+        "the K/pi species distinction lives in ``muon_source``. "
+        "None auto-selects: 0 for --source jpsi, 100 for --source wz, "
+        "200 for --source d0 (no collision in an end-to-end run).",
     )
 
     # ---- Output ------------------------------------------------------
@@ -373,6 +447,13 @@ def parse_args():
         help="(--source wz only) Output directory; one "
         "<dataset_name>.root is written per dataset. None falls back "
         "to ./flow_training_snapshot_wz/.",
+    )
+    p.add_argument(
+        "--d0-output-dir",
+        default=None,
+        help="(--source d0 only) Output directory; one "
+        "<dataset_name>.root is written per --d0-input-paths entry. "
+        "None falls back to ./flow_training_snapshot_d0/.",
     )
     p.add_argument(
         "--output-tree",
@@ -397,9 +478,14 @@ def parse_args():
     p.add_argument(
         "--pt-min",
         type=float,
-        default=2.0,
-        help="(--source jpsi only) Reject events where either gen pt "
-        "is below this (GeV).",
+        default=None,
+        help="Reject candidates where either gen pt is below this "
+        "(GeV): applied to both muons in --source jpsi, and to both "
+        "K/pi daughters in --source d0. None auto-selects per mode -- "
+        "2.0 for the muon sources, 1.0 for --source d0, whose "
+        "daughter spectrum peaks near 3 GeV with a 5th percentile "
+        "around 1.2 GeV (the muon default would cut roughly a third "
+        "of it).",
     )
     p.add_argument(
         "--eta-max",
@@ -475,7 +561,29 @@ def parse_args():
         "(source_id, entry, muon_idx)) and the in-bucket shuffle "
         "permutations.",
     )
-    return p.parse_args()
+    args = p.parse_args()
+
+    # ``--smearing`` defaults to None so we can tell "user asked for
+    # it" from "user said nothing". The smearing helper is built from
+    # muon resolution maps, so it is meaningless for D0 K/pi tracks:
+    # refuse an explicit request and default the mode to off.
+    if args.source == "d0":
+        if args.smearing:
+            p.error(
+                "--smearing is not applicable to --source d0: the "
+                "resolution-matching helper is built from muon "
+                "resolution maps and must not be applied to D0 K/pi "
+                "daughters. Drop the flag (or pass --no-smearing)."
+            )
+        args.smearing = False
+    elif args.smearing is None:
+        args.smearing = True
+
+    # ``--pt-min`` likewise defaults per mode: the 2 GeV muon value is
+    # far up the D0 daughter spectrum, so d0 gets 1.0 instead.
+    if args.pt_min is None:
+        args.pt_min = 1.0 if args.source == "d0" else 2.0
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -653,12 +761,11 @@ def run_jpsi_snapshot(args) -> str:
     # -> hist / uproot) can shadow them. Requires xrootd pip package
     # < 6 so that pyxrootd's libXrdCl matches ROOT's (both v5).
     import ROOT
-    import XRootD.client  # noqa: F401
-
     import wremnants
     import wremnants.production.muon_calibration
     import wremnants.production.pileup
     import wremnants.production.vertex
+    import XRootD.client  # noqa: F401
 
     out = args.output or "flow_training_snapshot_jpsi.root"
     out_dir = os.path.dirname(os.path.abspath(out))
@@ -773,6 +880,216 @@ def run_jpsi_snapshot(args) -> str:
     print(f"snapshot done in {dt:.1f}s")
     print(f"output file size: {os.path.getsize(out) / 1e6:.1f} MB")
     return out
+
+
+# ---------------------------------------------------------------------------
+# D0 -> K pi: two-track RVec build from the truth-matched ALCARECO tree
+# ---------------------------------------------------------------------------
+
+
+def _d0_dataset_name(path: str) -> str:
+    """Short label for one --d0-input-paths entry, used for the output
+    filename and the source-id side-car."""
+    base = os.path.basename(os.path.normpath(path))
+    if base.lower().endswith(".root"):
+        base = base[: -len(".root")]
+    return base or "d0"
+
+
+def resolve_d0_input_paths(path: str) -> List[str]:
+    """Resolve one --d0-input-paths entry to a sorted .root file list.
+
+    Local POSIX only -- these productions live on /scratch, so unlike
+    the J/psi branch there is no xrootd involved and no need for the
+    ``XRootD.client``-first import dance.
+    """
+    import glob as _glob
+
+    if path.lower().endswith(".root"):
+        return [path] if os.path.isfile(path) else []
+    if os.path.isdir(path):
+        return sorted(_glob.glob(os.path.join(path, "**", "*.root"), recursive=True))
+    return sorted(_glob.glob(path))
+
+
+def _define_d0_rvecs(df, source_id: int, pt_min: float, eta_max: float):
+    """Define the unified per-track RVec schema on a D0 RDataFrame.
+
+    Each row of ``dstToD0PiMCTruthProducer/MatchedCandidates`` is one
+    truth-matched D* -> D0(-> K pi) pi_s chain, with scalar branches
+    per track, so the RVec is length 2: **kaon first, pion second**.
+    That ordering is what makes ``muon_source = {321, 211}`` correct,
+    and it matches the (K, pi) ordering d0_mass.py uses.
+
+    Selection (deliberately looser than the analysis's
+    ``MC_passDataSelection``, which keeps only ~24% of rows): a valid
+    CVH refit plus a gen match. The reweight is conditioned on
+    ``(y, c)`` and applied per track, so there is no need to restrict
+    training to the analysis's candidate-level selection.
+
+    ``CVH_D0_CVH_valid`` is the load-bearing cut: when the refit fails
+    the producer writes ``CVH_{K,pi}_charge = 0`` and ``pt = 0``, which
+    would make ``kappa_reco`` a 0/0 NaN. The loader's finite-ness
+    filter would drop those anyway, but silently -- cutting here keeps
+    the row count honest.
+
+    Reco and gen charge are taken from independent branches
+    (``CVH_K_charge`` vs ``truth_K_charge``) rather than hardcoded, so
+    a charge mismeasurement would surface as the ``r_kappa ~ -2`` mode
+    the trainer already knows about. In the current MC they never
+    disagree (0 / 144566 on valid refits), but hardcoding the signs
+    would hide it if a future production changes that.
+    """
+    df = df.Filter("CVH_D0_CVH_valid", "cvh_refit_valid")
+    df = df.Filter("MC_nMatchedChains > 0", "gen_matched")
+    df = df.Filter(
+        "CVH_K_CVH_pt > 0.f && CVH_pi_CVH_pt > 0.f && "
+        "CVH_K_charge != 0 && CVH_pi_charge != 0",
+        "reco_track_valid",
+    )
+    df = df.Filter(
+        "truth_K_pt > 0.f && truth_pi_pt > 0.f",
+        "gen_pt_positive",
+    )
+    if pt_min > 0.0:
+        df = df.Filter(
+            f"truth_K_pt > {pt_min} && truth_pi_pt > {pt_min}",
+            "gen_pt_minimum",
+        )
+    df = df.Filter(
+        f"std::fabs(truth_K_eta) < {eta_max} && "
+        f"std::fabs(truth_pi_eta) < {eta_max}",
+        "gen_eta_acceptance",
+    )
+
+    df = df.Define(
+        "eta_reco",
+        "ROOT::VecOps::RVec<float>{"
+        " static_cast<float>(CVH_K_CVH_eta),"
+        " static_cast<float>(CVH_pi_CVH_eta)}",
+    )
+    df = df.Define(
+        "phi_reco",
+        "ROOT::VecOps::RVec<float>{"
+        " static_cast<float>(CVH_K_CVH_phi),"
+        " static_cast<float>(CVH_pi_CVH_phi)}",
+    )
+    df = df.Define(
+        "eta_gen",
+        "ROOT::VecOps::RVec<float>{"
+        " static_cast<float>(truth_K_eta),"
+        " static_cast<float>(truth_pi_eta)}",
+    )
+    df = df.Define(
+        "phi_gen",
+        "ROOT::VecOps::RVec<float>{"
+        " static_cast<float>(truth_K_phi),"
+        " static_cast<float>(truth_pi_phi)}",
+    )
+    # kappa = q / |p| = q / (pt * cosh(eta)).
+    df = df.Define(
+        "kappa_reco",
+        "ROOT::VecOps::RVec<float>{"
+        " static_cast<float>(CVH_K_charge) "
+        "   / (static_cast<float>(CVH_K_CVH_pt) "
+        "      * std::cosh(static_cast<float>(CVH_K_CVH_eta))),"
+        " static_cast<float>(CVH_pi_charge) "
+        "   / (static_cast<float>(CVH_pi_CVH_pt) "
+        "      * std::cosh(static_cast<float>(CVH_pi_CVH_eta)))}",
+    )
+    df = df.Define(
+        "kappa_gen",
+        "ROOT::VecOps::RVec<float>{"
+        " static_cast<float>(truth_K_charge) "
+        "   / (static_cast<float>(truth_K_pt) "
+        "      * std::cosh(static_cast<float>(truth_K_eta))),"
+        " static_cast<float>(truth_pi_charge) "
+        "   / (static_cast<float>(truth_pi_pt) "
+        "      * std::cosh(static_cast<float>(truth_pi_eta)))}",
+    )
+    # No generator or pileup weight is stored on these ntuples.
+    df = df.Define("nominal_weight", "ROOT::VecOps::RVec<float>{1.0f, 1.0f}")
+    df = df.Define(
+        "source_id",
+        f"ROOT::VecOps::RVec<int>{{{int(source_id)}, {int(source_id)}}}",
+    )
+    # |PDG id| of each daughter -> the "kpi" source scheme's raw codes
+    # (see arrow_shard_loader.SOURCE_SCHEMES): 321 = K, 211 = pi.
+    df = df.Define("muon_source", "ROOT::VecOps::RVec<int>{321, 211}")
+    return df
+
+
+def run_d0_snapshot(args) -> List[str]:
+    """One snapshot per --d0-input-paths entry. ``source_id`` is
+    ``base + dataset_index`` -- the dataset only; the K/pi distinction
+    is carried by ``muon_source``."""
+    import ROOT
+
+    out_dir = args.d0_output_dir or "flow_training_snapshot_d0"
+    os.makedirs(out_dir, exist_ok=True)
+
+    base = D0_SOURCE_ID_BASE if args.source_id is None else int(args.source_id)
+    if not ROOT.ROOT.IsImplicitMTEnabled():
+        if args.threads == 0:
+            ROOT.ROOT.EnableImplicitMT()
+        elif args.threads > 1:
+            ROOT.ROOT.EnableImplicitMT(args.threads)
+
+    written: List[str] = []
+    entries = []
+    for i, path in enumerate(args.d0_input_paths):
+        name = _d0_dataset_name(path)
+        sid = base + i
+        files = resolve_d0_input_paths(path)
+        if not files:
+            print(f"warning: no .root files found under {path}", file=sys.stderr)
+            continue
+        if args.d0_max_files > 0 and len(files) > args.d0_max_files:
+            print(f"  capping {name} from {len(files)} to {args.d0_max_files} files")
+            files = files[: args.d0_max_files]
+        print(f"[{name}] {len(files)} file(s), source_id = {sid}")
+
+        t0 = time.time()
+        df = ROOT.ROOT.RDataFrame(args.d0_tree, files)
+        if args.progress:
+            ROOT.ROOT.RDF.Experimental.AddProgressBar(df)
+        df = _define_d0_rvecs(
+            df,
+            source_id=sid,
+            pt_min=float(args.pt_min),
+            eta_max=float(args.d0_eta_max),
+        )
+
+        snapshot_options = ROOT.RDF.RSnapshotOptions()
+        if args.snapshot_format == "rntuple":
+            snapshot_options.fOutputFormat = ROOT.RDF.ESnapshotOutputFormat.kRNTuple
+            snapshot_options.fCompressionAlgorithm = (
+                ROOT.RCompressionSetting.EAlgorithm.kLZ4
+            )
+            snapshot_options.fCompressionLevel = 1
+        else:
+            snapshot_options.fCompressionAlgorithm = (
+                ROOT.RCompressionSetting.EAlgorithm.kZSTD
+            )
+            snapshot_options.fCompressionLevel = 5
+
+        cols_vec = ROOT.std.vector("string")()
+        for c in OUTPUT_BRANCHES:
+            cols_vec.push_back(c)
+        out = os.path.join(out_dir, f"{name}.root")
+        df.Snapshot(args.output_tree, out, cols_vec, snapshot_options)
+
+        dt = time.time() - t0
+        print(
+            f"[{name}] wrote {out} in {dt:.1f}s "
+            f"({os.path.getsize(out) / 1e6:.1f} MB)"
+        )
+        written.append(out)
+        entries.append({"source_id": sid, "sample_name": f"D0 K/pi ({name})"})
+
+    for out in written:
+        _write_source_meta(out, entries)
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -893,12 +1210,11 @@ def _define_wz_rvecs(df, dataset, args, calib_helpers, source_id: int):
 def run_wz_snapshot(args) -> List[str]:
     # ``XRootD.client`` first — see run_jpsi_snapshot for rationale.
     import ROOT
-    import XRootD.client  # noqa: F401
-
     import wremnants
     import wremnants.production.muon_calibration
     import wremnants.production.pileup
     import wremnants.production.vertex
+    import XRootD.client  # noqa: F401
     from wremnants.production.datasets.dataset_tools import getDatasets
     from wremnants.utilities import common, samples
 
@@ -1082,20 +1398,38 @@ def run_wz_snapshot(args) -> List[str]:
 
 
 def _autodetect_shard_inputs() -> List[str]:
-    """Pick up the J/psi snapshot file + every W/Z snapshot in the
-    default output locations used by --source jpsi / --source wz.
-    Empty list if nothing's present.
+    """Pick up the snapshots in the default output locations used by
+    --source jpsi / --source wz / --source d0. Empty list if nothing's
+    present.
+
+    Refuses to mix the muon snapshots (jpsi, wz -- muon_source codes
+    {1, 15, 443}) with the D0 ones ({321, 211}): a trained model
+    resolves exactly one ``arrow_shard_loader.SOURCE_SCHEMES`` entry,
+    so a merged shard set would map one family or the other to NaN and
+    silently drop it. Pass --inputs explicitly to override.
     """
-    found: List[str] = []
+    muon: List[str] = []
+    d0: List[str] = []
     jpsi_default = "flow_training_snapshot_jpsi.root"
     if os.path.isfile(jpsi_default):
-        found.append(jpsi_default)
-    wz_default_dir = "flow_training_snapshot_wz"
-    if os.path.isdir(wz_default_dir):
-        for fname in sorted(os.listdir(wz_default_dir)):
-            if fname.endswith(".root"):
-                found.append(os.path.join(wz_default_dir, fname))
-    return found
+        muon.append(jpsi_default)
+    for dirname, bucket in (
+        ("flow_training_snapshot_wz", muon),
+        ("flow_training_snapshot_d0", d0),
+    ):
+        if os.path.isdir(dirname):
+            for fname in sorted(os.listdir(dirname)):
+                if fname.endswith(".root"):
+                    bucket.append(os.path.join(dirname, fname))
+    if muon and d0:
+        raise SystemExit(
+            "error: auto-detection found both muon snapshots "
+            f"({len(muon)}) and D0 snapshots ({len(d0)}) in the cwd. "
+            "They use different muon_source encodings ('muon' vs "
+            "'kpi') and must be sharded into separate shard sets. "
+            "Re-run with an explicit --inputs (and --shard-output-dir)."
+        )
+    return muon or d0
 
 
 def run_shard_only(args) -> int:
@@ -1103,9 +1437,13 @@ def run_shard_only(args) -> int:
     if not inputs:
         print(
             "error: --shard-only requires --inputs (no default "
-            "snapshots found in cwd: looked for "
-            "./flow_training_snapshot_jpsi.root and "
-            "./flow_training_snapshot_wz/*.root)",
+            "snapshots found in cwd). Auto-detection looks for:\n"
+            "  ./flow_training_snapshot_jpsi.root   (--source jpsi)\n"
+            "  ./flow_training_snapshot_wz/*.root   (--source wz)\n"
+            "  ./flow_training_snapshot_d0/*.root   (--source d0)\n"
+            "The muon snapshots (jpsi, wz) and the D0 ones use "
+            "different muon_source encodings and are never merged; "
+            "pass --inputs explicitly to shard a specific set.",
             file=sys.stderr,
         )
         return 1
@@ -1159,6 +1497,9 @@ def main():
     if args.source == "wz":
         paths = run_wz_snapshot(args)
         return 0 if paths else 1
+    if args.source == "d0":
+        paths = run_d0_snapshot(args)
+        return 0 if paths else 1
     # Bare invocation: run all three steps sequentially in this
     # process. Each ``run_*`` function imports ``XRootD.client``
     # first to pin pyxrootd's libssl-1.1 before pyarrow loads
@@ -1170,6 +1511,9 @@ def main():
     print("  step 1: J/psi snapshot     -> flow_training_snapshot_jpsi.root")
     print("  step 2: W/Z snapshot       -> flow_training_snapshot_wz/*.root")
     print("  step 3: Arrow IPC sharding -> shards/")
+    print("  (--source d0 is deliberately excluded: its muon_source")
+    print("   codes belong to the 'kpi' scheme and cannot share a")
+    print("   shard set with the muon snapshots -- run it separately)")
     print("=" * 70)
 
     print("\n[step 1/3] J/psi snapshot")

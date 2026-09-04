@@ -3098,6 +3098,24 @@ def parse_args():
         "tail.",
     )
     p.add_argument(
+        "--source-scheme",
+        choices=["muon", "kpi"],
+        default="muon",
+        help="Encoding for the ``muon_source`` conditioning column. "
+        "'muon' (default) is the historical 3-class muon encoding: raw "
+        "{1, 15, 443} (prompt W/Z, tau-decay, J/psi) -> {-1, 0, +1}. "
+        "'kpi' is the 2-class D0 -> K pi daughter encoding, keyed on "
+        "|PDG id|: raw {321, 211} (kaon, pion) -> {-1, +1}; here the "
+        "column separates particle species rather than decay source, "
+        "and the three muon classes are unused. The shards must have "
+        "been written with matching raw codes -- rows carrying a code "
+        "outside the chosen scheme map to NaN and are dropped by the "
+        "finite-ness filter, so a mismatch shows up as an empty "
+        "training set. The choice is recorded in preproc.json and the "
+        "checkpoint, and shift_smear_reweight_export.py bakes the "
+        "matching remap into the ONNX graph automatically.",
+    )
+    p.add_argument(
         "--weight-handling",
         choices=["abs", "keep", "drop"],
         default="abs",
@@ -3753,6 +3771,7 @@ def main_worker(
     # prefetch thread handle pipelining.
     if n_data_workers > 0:
         import torch.utils.data as _td
+
         from arrow_shard_loader import dataloader_worker_init
 
         train_loader = _td.DataLoader(
@@ -4203,6 +4222,7 @@ def main():
         holdout_fraction=args.holdout_fraction,
         robust=bool(getattr(args, "robust_stats", False)),
         robust_sample_rows=int(getattr(args, "robust_sample_rows", 1_000_000)),
+        source_scheme=args.source_scheme,
     )
     with open(os.path.join(args.output, "preproc.json"), "w") as f:
         json.dump(asdict(stats), f, indent=2)
