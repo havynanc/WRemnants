@@ -12,8 +12,9 @@ WREMNANTS_DIR = Path(__file__).resolve().parent / "WRemnants"
 if str(WREMNANTS_DIR) not in sys.path:
     sys.path.insert(0, str(WREMNANTS_DIR))
 
+from wremnants.utilities import common
 from wremnants.utilities.io_tools import base_io
-from wums import ioutils
+from wums import ioutils, output_tools
 
 jpsi_channel_names = {
     "dimuon20_jpsi": "JPsi_prompt",
@@ -472,15 +473,22 @@ def load_calinput_datasets(path):
         results = base_io.load_results_h5py(h5file)
 
         datasets = {}
+        input_meta_info = None
         for dataset_name, result in results.items():
-            if dataset_name == "meta_info" or not isinstance(result, dict):
+            if dataset_name == "meta_info":
+                # The dimuon_resonances_calinput.py command/args/git info;
+                # propagated into the tensor output as meta_info_input so
+                # provenance is preserved.
+                input_meta_info = materialize(result)
+                continue
+            if not isinstance(result, dict):
                 continue
             histograms = {}
             for hist_name, hist_obj in result.get("output", {}).items():
                 histograms[hist_name] = materialize(hist_obj)
             datasets[dataset_name] = histograms
 
-    return datasets
+    return datasets, input_meta_info
 
 
 def make_jpsi_channel(dataset_label, histograms):
@@ -523,13 +531,13 @@ def make_jpsi_channel(dataset_label, histograms):
 
 
 def load_jpsi_channels_from_calinput(path):
-    datasets = load_calinput_datasets(path)
+    datasets, input_meta_info = load_calinput_datasets(path)
 
     # Backward compatibility for the original HDF5 layout with one data and
     # one MC dataset. The new layout uses one pair of datasets per trigger.
     if "jpsi_data" in datasets and "jpsi_mc" in datasets:
         histograms = {**datasets["jpsi_data"], **datasets["jpsi_mc"]}
-        return [make_jpsi_channel("", histograms)]
+        return [make_jpsi_channel("", histograms)], input_meta_info
 
     data_prefix = "jpsi_data_"
     mc_prefix = "jpsi_mc_"
@@ -555,7 +563,7 @@ def load_jpsi_channels_from_calinput(path):
             **datasets[f"{mc_prefix}{label}"],
         }
         channels.append(make_jpsi_channel(label, histograms))
-    return channels
+    return channels, input_meta_info
 
 
 def split_calinput_scale_variations(
@@ -779,7 +787,8 @@ cov_data = np.array([])
 #                 constrained=True #should be True usually
 #             )
 
-for resultdict in load_jpsi_channels_from_calinput(args.calinputHdf5):
+jpsi_channels, input_meta_info = load_jpsi_channels_from_calinput(args.calinputHdf5)
+for resultdict in jpsi_channels:
     sample = resultdict["name"]
     if sample not in args.jpsiChannels:
         print(f"skipping channel {sample}")
@@ -1010,4 +1019,12 @@ if directory == "":
 filename = args.outname
 if args.postfix:
     filename += f"_{args.postfix}"
-writer.write(outfolder=directory, outfilename=filename)
+
+# Propagate provenance into the tensor: this script's command in meta_info and
+# the upstream dimuon_resonances_calinput.py command (read from the input file)
+# in meta_info_input, mirroring setupRabbit.py and d0_tensor.py.
+meta = {
+    "meta_info": output_tools.make_meta_info_dict(args=args, wd=common.base_dir),
+    "meta_info_input": input_meta_info,
+}
+writer.write(outfolder=directory, outfilename=filename, meta_data_dict=meta)

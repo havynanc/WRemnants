@@ -3,14 +3,17 @@
 This is the D0 -> K pi analogue of scripts/rabbit/lowmass_tensor.py (which
 consumes the J/psi calInput histograms). The differences are:
 
-  * The histograms here are 3D (etaK, mRK, D0mass) instead of the 5D
-    (eta1, eta2, pt1, pt2, mass) J/psi templates. The lineshape ("shape")
-    axis is "D0mass" instead of "mass".
+  * The histograms here are 3D (etaK, mRK, D0mass) or, when d0_mass.py is run
+    with --pionTemplateAxes, 5D (etaK, mRK, etaPi, mRpi, D0mass), instead of the
+    (eta1, eta2, pt1, pt2, mass) J/psi templates. The lineshape ("shape") axis
+    is "D0mass" instead of "mass". Use --tensorDim to pick 3D or 5D (or leave it
+    at 'auto' to follow the input); a 5D input can be projected down to 3D.
   * Only the muon scale variations, muon resolution variations and a flat
     background are implemented. Pixel multiplicity systematics/stats, tail
     morphing and projection options are intentionally not carried over.
 
-Input histograms produced by d0_mass.py:
+Input histograms produced by d0_mass.py (3D shown; the 5D variant inserts the
+etaPi, mRpi axes before D0mass):
 
   D0_data / output:
     hD0_data                                 (etaK, mRK, D0mass)
@@ -34,11 +37,16 @@ WREMNANTS_DIR = Path(__file__).resolve().parent / "WRemnants"
 if str(WREMNANTS_DIR) not in sys.path:
     sys.path.insert(0, str(WREMNANTS_DIR))
 
+from wremnants.utilities import common
 from wremnants.utilities.io_tools import base_io
-from wums import ioutils
+from wums import ioutils, output_tools
 
 # The lineshape axis for the D0 templates.
 SHAPE_AXIS = "D0mass"
+
+# The pion kinematic axes present only in 5D (--pionTemplateAxes) templates.
+# Projecting these away (summing over them) reduces a 5D input to the 3D layout.
+PION_AXES = ["etaPi", "mRpi"]
 
 # Muon scale nuisance categories, matching the WRemnants massfit uncertainty
 # helper (data_jpsi_crctn_unc_helper). One (A, e, M) triplet per eta bin.
@@ -81,6 +89,18 @@ parser.add_argument(
     help="Name for the D0 fit channel",
 )
 parser.add_argument(
+    "--tensorDim",
+    choices=["auto", "3", "5"],
+    default="auto",
+    help=(
+        "Dimensionality of the fit tensor. 'auto' (default) follows the input "
+        "histograms. '3' builds a 3D (etaK, mRK, D0mass) tensor, projecting away "
+        "the pion axes (etaPi, mRpi) if the input is 5D. '5' builds a 5D "
+        "(etaK, mRK, etaPi, mRpi, D0mass) tensor and requires those axes to be "
+        "present in the input (produced by d0_mass.py --pionTemplateAxes)."
+    ),
+)
+parser.add_argument(
     "--skipMuonScale",
     default=False,
     action="store_true",
@@ -109,9 +129,9 @@ parser.add_argument(
     default=-1,
     type=float,
     help=(
-        "Event threshold in raw MC for a (etaK, mRK) cell being included in "
-        "the fit. Disabled by default. Zeros both MC and data in failing cells "
-        "if specified."
+        "Event threshold in raw MC for a kinematic (non-mass) cell being "
+        "included in the fit. Disabled by default. Zeros both MC and data in "
+        "failing cells if specified."
     ),
 )
 parser.add_argument(
@@ -237,14 +257,70 @@ def materialize(obj):
     return obj.get() if isinstance(obj, ioutils.H5PickleProxy) else obj
 
 
+def has_pion_axes(dummy_hist):
+    """True if the histogram carries the 5D pion kinematic axes."""
+    names = set(dummy_hist.axes.name)
+    return all(ax in names for ax in PION_AXES)
+
+
+def project_out_pion_axes(dummy_hist):
+    """Sum a 5D histogram over the pion axes (etaPi, mRpi), returning the 3D
+    layout. The remaining axes keep their original order, so the extra
+    systematic axes (unc/downUpVar, smearing_variation) survive unchanged."""
+    keep = [ax.name for ax in dummy_hist.axes if ax.name not in PION_AXES]
+    return dummy_hist.project(*keep)
+
+
+def resolve_tensor_dim(channel, tensor_dim):
+    """Reconcile the requested --tensorDim with the input dimensionality,
+    projecting the channel histograms from 5D down to 3D when needed. Modifies
+    and returns the channel dict."""
+    input_is_5d = has_pion_axes(channel["D0_mc"])
+    if tensor_dim == "auto":
+        target_5d = input_is_5d
+    elif tensor_dim == "5":
+        if not input_is_5d:
+            raise RuntimeError(
+                "--tensorDim 5 requires 5D input histograms with the "
+                f"{PION_AXES} axes; input has axes "
+                f"{list(channel['D0_mc'].axes.name)}. Run d0_mass.py with "
+                "--pionTemplateAxes."
+            )
+        target_5d = True
+    else:  # "3"
+        target_5d = False
+
+    if input_is_5d and not target_5d:
+        print(
+            f"Projecting 5D input down to 3D by summing over {PION_AXES} "
+            "(--tensorDim 3)"
+        )
+        for key in ("D0_data", "D0_mc", "D0_scale_syst", "D0_resolution_syst"):
+            if channel.get(key) is not None:
+                channel[key] = project_out_pion_axes(channel[key])
+    elif not input_is_5d and target_5d:
+        # Unreachable: the "5" branch already raised. Guard for clarity.
+        raise RuntimeError("Cannot build a 5D tensor from 3D input histograms")
+
+    dim = 5 if target_5d else 3
+    print(f"Building {dim}D tensor (axes: {list(channel['D0_mc'].axes.name)})")
+    return channel
+
+
 def load_d0_histograms(path):
     """Load the D0 data and MC histograms from a d0_mass.py output file."""
     with h5py.File(path, "r") as h5file:
         results = base_io.load_results_h5py(h5file)
 
         datasets = {}
+        input_meta_info = None
         for dataset_name, result in results.items():
-            if dataset_name == "meta_info" or not isinstance(result, dict):
+            if dataset_name == "meta_info":
+                # The d0_mass.py command/args/git info; propagated into the
+                # tensor output as meta_info_input so provenance is preserved.
+                input_meta_info = materialize(result)
+                continue
+            if not isinstance(result, dict):
                 continue
             histograms = {}
             for hist_name, hist_obj in result.get("output", {}).items():
@@ -293,6 +369,7 @@ def load_d0_histograms(path):
             if args.skipMuonResolution
             else mc["nominal_muonResolutionSyst_responseWeights"]
         ),
+        "meta_info_input": input_meta_info,
     }
     return channel
 
@@ -384,6 +461,7 @@ writer = tensorwriter.TensorWriter(
 )
 
 resultdict = load_d0_histograms(args.d0Hdf5)
+resultdict = resolve_tensor_dim(resultdict, args.tensorDim)
 sample = resultdict["name"]
 print(f"processing {sample}")
 
@@ -414,8 +492,8 @@ scaling_factor = data_total / mc_total
 print("scaling factor:", scaling_factor)
 hist_mc = hist_mc * scaling_factor
 
-# active (etaK, mRK) cells: nonempty MC, optionally intersected with a data
-# occupancy requirement.
+# active kinematic (non-mass) cells: nonempty MC, optionally intersected with a
+# data occupancy requirement. In 3D these are (etaK, mRK); in 5D also (etaPi, mRpi).
 signal_active_cells = populated_cells(hist_mc, event_thresh=args.mcEventThresh)
 if args.dataEventThresh > 0:
     signal_active_cells = signal_active_cells & populated_cells(
@@ -498,4 +576,12 @@ if directory == "":
 filename = args.outname
 if args.postfix:
     filename += f"_{args.postfix}"
-writer.write(outfolder=directory, outfilename=filename)
+
+# Propagate provenance into the tensor: this script's command in meta_info and
+# the upstream d0_mass.py command (read from the input file) in meta_info_input,
+# mirroring setupRabbit.py.
+meta = {
+    "meta_info": output_tools.make_meta_info_dict(args=args, wd=common.base_dir),
+    "meta_info_input": resultdict.get("meta_info_input"),
+}
+writer.write(outfolder=directory, outfilename=filename, meta_data_dict=meta)

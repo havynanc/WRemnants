@@ -144,7 +144,57 @@ parser.add_argument(
     default=None,
     help=(
         "Use this many regular mRK template bins over [0, 1.8]. If omitted, "
-        "retain the legacy 19-bin variable-width axis."
+        "retain the legacy 19-bin variable-width axis. Mutually exclusive with "
+        "--templateMRKEdges."
+    ),
+)
+parser.add_argument(
+    "--templateMRKEdges",
+    type=float,
+    nargs="+",
+    default=None,
+    help=(
+        "Explicit mRK template bin edges (>=2, strictly increasing). Mutually "
+        "exclusive with --templateMRKBins."
+    ),
+)
+parser.add_argument(
+    "--pionTemplateAxes",
+    action="store_true",
+    help=(
+        "Save 5D templates (etaK, mRK, etaPi, mRpi, D0mass) instead of the "
+        "default 3D (etaK, mRK, D0mass), where etaPi/mRpi are the literal K->pi "
+        "swaps of etaK/mRK. Requires, for each of mRK and mRpi, either the bin "
+        "count or the bin edges to be specified."
+    ),
+)
+parser.add_argument(
+    "--templateEtaPiBins",
+    type=int,
+    default=None,
+    help=(
+        "Number of regular etaPi template bins over [-2.4, 2.4] when "
+        "--pionTemplateAxes is set. Defaults to --templateEtaKBins."
+    ),
+)
+parser.add_argument(
+    "--templateMRpiBins",
+    type=int,
+    default=None,
+    help=(
+        "Number of uniform mRpi template bins over [0, 0.20] (the mRpi range, "
+        "~(M_pi/M_K)^2 times the mRK range) when --pionTemplateAxes is set. "
+        "Mutually exclusive with --templateMRpiEdges."
+    ),
+)
+parser.add_argument(
+    "--templateMRpiEdges",
+    type=float,
+    nargs="+",
+    default=None,
+    help=(
+        "Explicit mRpi template bin edges (>=2, strictly increasing) when "
+        "--pionTemplateAxes is set. Mutually exclusive with --templateMRpiBins."
     ),
 )
 parser.add_argument(
@@ -184,6 +234,31 @@ if args.templateEtaKBins <= 0:
     raise ValueError("--templateEtaKBins must be a positive integer")
 if args.templateMRKBins is not None and args.templateMRKBins <= 0:
     raise ValueError("--templateMRKBins must be a positive integer")
+if args.templateMRpiBins is not None and args.templateMRpiBins <= 0:
+    raise ValueError("--templateMRpiBins must be a positive integer")
+if args.templateEtaPiBins is not None and args.templateEtaPiBins <= 0:
+    raise ValueError("--templateEtaPiBins must be a positive integer")
+# Bins and edges are mutually exclusive per reduced-mass axis.
+if args.templateMRKBins is not None and args.templateMRKEdges is not None:
+    raise ValueError(
+        "--templateMRKBins and --templateMRKEdges are mutually exclusive"
+    )
+if args.templateMRpiBins is not None and args.templateMRpiEdges is not None:
+    raise ValueError(
+        "--templateMRpiBins and --templateMRpiEdges are mutually exclusive"
+    )
+# 5D output requires each reduced-mass axis to be specified as bins OR edges.
+if args.pionTemplateAxes:
+    if args.templateMRKBins is None and args.templateMRKEdges is None:
+        raise ValueError(
+            "--pionTemplateAxes (5D output) requires --templateMRKBins or "
+            "--templateMRKEdges"
+        )
+    if args.templateMRpiBins is None and args.templateMRpiEdges is None:
+        raise ValueError(
+            "--pionTemplateAxes (5D output) requires --templateMRpiBins or "
+            "--templateMRpiEdges"
+        )
 if args.resolutionPrefitUncertainty <= 0:
     raise ValueError("--resolutionPrefitUncertainty must be positive")
 if (
@@ -378,10 +453,11 @@ ROOT.gInterpreter.Declare("""
     namespace wrem {
     namespace d0 {
 
-    // Per-event varied observables: mass[k] and mRK[k] share the flattened index k.
+    // Per-event varied observables: mass[k], mRK[k], mRpi[k] share the index k.
     struct ScaleVarResult {
         ROOT::VecOps::RVec<double> mass;
         ROOT::VecOps::RVec<double> mRK;
+        ROOT::VecOps::RVec<double> mRpi;
     };
 
     class ScaleVariationsHelper {
@@ -420,12 +496,17 @@ ROOT.gInterpreter.Declare("""
             return mK_ * mK_ * (ePi / eK) / mass;
         }
 
-        // Returns nvars*2 varied mass and mRK values, ordered (ieta, iparm, {down, up})
+        // mRpi: literal K<->pi swap of mRK, matching M_pi^2 * (K_E/pi_E) / mass.
+        double mrpi(double eK, double ePi, double mass) const {
+            return mPi_ * mPi_ * (eK / ePi) / mass;
+        }
+
+        // Returns nvars*2 varied mass, mRK, mRpi values, ordered (ieta, iparm, {down, up})
         // so the flattened index is ivar*2 + isign with ivar = ieta*n_scale_params + iparm.
         ScaleVarResult operator()(
             double ptK, double etaK, double phiK, double qK,
             double ptPi, double etaPi, double phiPi, double qPi,
-            double d0_mass_nom, double mRK_nom) const {
+            double d0_mass_nom, double mRK_nom, double mRpi_nom) const {
 
             const int biK = eta_bin(etaK);
             const int biPi = eta_bin(etaPi);
@@ -439,12 +520,15 @@ ROOT.gInterpreter.Declare("""
             const ROOT::Math::PtEtaPhiMVector v0K(ptK, etaK, phiK, mK_);
             const ROOT::Math::PtEtaPhiMVector v0Pi(ptPi, etaPi, phiPi, mPi_);
             const double m_nom = (v0K + v0Pi).M();
-            const double mrk_nom_recomp =
-                mrk(energy(ptK, coshK, mK_), energy(ptPi, coshPi, mPi_), m_nom);
+            const double eK_nom = energy(ptK, coshK, mK_);
+            const double ePi_nom = energy(ptPi, coshPi, mPi_);
+            const double mrk_nom_recomp = mrk(eK_nom, ePi_nom, m_nom);
+            const double mrpi_nom_recomp = mrpi(eK_nom, ePi_nom, m_nom);
 
             ScaleVarResult res;
             res.mass.reserve(nvars_ * 2);
             res.mRK.reserve(nvars_ * 2);
+            res.mRpi.reserve(nvars_ * 2);
             const double signs[2] = {-1.0, 1.0};  // down, up
             for (unsigned int ieta = 0; ieta < n_eta_bins_; ++ieta) {
                 for (unsigned int iparm = 0; iparm < n_scale_params_; ++iparm) {
@@ -457,10 +541,13 @@ ROOT.gInterpreter.Declare("""
                         const ROOT::Math::PtEtaPhiMVector vK(ptKs, etaK, phiK, mK_);
                         const ROOT::Math::PtEtaPhiMVector vPi(ptPis, etaPi, phiPi, mPi_);
                         const double m_var = (vK + vPi).M();
-                        const double mrk_var =
-                            mrk(energy(ptKs, coshK, mK_), energy(ptPis, coshPi, mPi_), m_var);
+                        const double eK_var = energy(ptKs, coshK, mK_);
+                        const double ePi_var = energy(ptPis, coshPi, mPi_);
+                        const double mrk_var = mrk(eK_var, ePi_var, m_var);
+                        const double mrpi_var = mrpi(eK_var, ePi_var, m_var);
                         res.mass.push_back(d0_mass_nom + (m_var - m_nom));
                         res.mRK.push_back(mRK_nom + (mrk_var - mrk_nom_recomp));
+                        res.mRpi.push_back(mRpi_nom + (mrpi_var - mrpi_nom_recomp));
                     }
                 }
             }
@@ -542,18 +629,34 @@ datasets = [
     ),
 ]
 
-axis_etaK, axis_mRK, axis_D0mass = make_d0_template_axes(
+template_axes = make_d0_template_axes(
     eta_bins=args.templateEtaKBins,
     mrk_bins=args.templateMRKBins,
+    mrk_edges=args.templateMRKEdges,
+    pion_axes=args.pionTemplateAxes,
+    eta_pi_bins=args.templateEtaPiBins,
+    mrpi_bins=args.templateMRpiBins,
+    mrpi_edges=args.templateMRpiEdges,
 )
-d0_axes = [axis_etaK, axis_mRK, axis_D0mass]
+d0_axes = list(template_axes)
 
-# Axes for the optional --kinDiagnostics histograms. gen/reco mRK reuse the analysis
-# axis_mRK binning; the mRK ratio gets its own axis (analogous to qopr).
+# Coordinate columns matching d0_axes, in the same order. In 5D mode the pion
+# analogues (pi_CVH_eta0, mRpi) are inserted before the D0 mass (shape) axis.
+if args.pionTemplateAxes:
+    coord_cols = ["K_CVH_eta0", "mRK", "pi_CVH_eta0", "mRpi", "D0_mass"]
+else:
+    coord_cols = ["K_CVH_eta0", "mRK", "D0_mass"]
+
+# Axes for the optional --kinDiagnostics histograms. mRK uses the wide mR axis;
+# mRpi gets its own ~12x-compressed axis (the K<->pi swap scales the reduced mass
+# by ~(M_pi/M_K)^2 ~ 0.08, with an energy-ratio tail extending a bit past that, so
+# [0, 0.20] covers the bulk with headroom). The mR ratio gets its own axis (like qopr).
 axis_diag_pt = hist.axis.Regular(100, 0.0, 20.0, name="pt")
-axis_diag_mRK = hist.axis.Regular(100, 0.0, 1.80, name="mRK")
+axis_diag_eta = hist.axis.Regular(96, -2.4, 2.4, name="eta")
+axis_diag_mR = hist.axis.Regular(100, 0.0, 1.80, name="mR")
+axis_diag_mRpi = hist.axis.Regular(100, 0.0, 0.20, name="mRpi")
 axis_diag_qopr = hist.axis.Regular(200, 0.5, 1.5, name="qopr")
-axis_diag_mRK_ratio = hist.axis.Regular(200, 0.0, 2.0, name="mRKr")
+axis_diag_mR_ratio = hist.axis.Regular(200, 0.0, 2.0, name="mRr")
 
 # Manual A/e/M scale-variation histogram. The per-(eta bin, parameter) construction
 # below is only valid for the diagonal prefit-width configuration (no covariance /
@@ -780,6 +883,8 @@ def define_reco(df):
         .Define("Dst_fit_deltaM_for_selection", delta_m_expr)
         .Define("D0_mass", d0_cvh_expr)
         .Define("mRK", f"{M_K}*{M_K}*(pi_E0/K_E0)/D0_mass")
+        # Literal K<->pi swap of mRK (mass prefactor and energy ratio both flip).
+        .Define("mRpi", f"{M_PI}*{M_PI}*(K_E0/pi_E0)/D0_mass")
     )
     if args.applyFitDeltaM and not delta_m_cols:
         logger.warning(
@@ -857,7 +962,7 @@ def build_graph(df, dataset):
             df.HistoBoost(
                 "hD0_data",
                 d0_axes,
-                ["K_CVH_eta0", "mRK", "D0_mass", "weight"],
+                coord_cols + ["weight"],
             )
         )
     else:
@@ -993,7 +1098,7 @@ def build_graph(df, dataset):
             df.HistoBoost(
                 "hD0_nom",
                 d0_axes,
-                ["K_CVH_eta0", "mRK", "D0_mass", "weight"],
+                coord_cols + ["weight"],
             )
         )
 
@@ -1027,6 +1132,12 @@ def build_graph(df, dataset):
                 )
                 .Define("mRK_gen", f"{M_K}*{M_K}*(pi_E_gen/K_E_gen)/D0_mass_gen")
                 .Define("mRK_ratio", "mRK / mRK_gen")
+                # gen/reco etaK, etaPi and the pion analogues of the mRK diagnostics
+                # (mRpi = literal K<->pi swap). reco mRpi is the existing "mRpi" column.
+                .Define("K_gen_eta", "K_gen_match[1]")
+                .Define("pi_gen_eta", "pi_gen_match[1]")
+                .Define("mRpi_gen", f"{M_PI}*{M_PI}*(K_E_gen/pi_E_gen)/D0_mass_gen")
+                .Define("mRpi_ratio", "mRpi / mRpi_gen")
             )
             for name, col, axis in [
                 ("hK_gen_pt", "K_gen_pt", axis_diag_pt),
@@ -1035,9 +1146,16 @@ def build_graph(df, dataset):
                 ("hpi_reco_pt", "pi_CVH_pt0", axis_diag_pt),
                 ("hK_qopr", "K_qopr", axis_diag_qopr),
                 ("hpi_qopr", "pi_qopr", axis_diag_qopr),
-                ("hmRK_gen", "mRK_gen", axis_diag_mRK),
-                ("hmRK_reco", "mRK", axis_diag_mRK),
-                ("hmRK_ratio", "mRK_ratio", axis_diag_mRK_ratio),
+                ("hmRK_gen", "mRK_gen", axis_diag_mR),
+                ("hmRK_reco", "mRK", axis_diag_mR),
+                ("hmRK_ratio", "mRK_ratio", axis_diag_mR_ratio),
+                ("hK_gen_eta", "K_gen_eta", axis_diag_eta),
+                ("hK_reco_eta", "K_CVH_eta0", axis_diag_eta),
+                ("hpi_gen_eta", "pi_gen_eta", axis_diag_eta),
+                ("hpi_reco_eta", "pi_CVH_eta0", axis_diag_eta),
+                ("hmRpi_gen", "mRpi_gen", axis_diag_mRpi),
+                ("hmRpi_reco", "mRpi", axis_diag_mRpi),
+                ("hmRpi_ratio", "mRpi_ratio", axis_diag_mR_ratio),
             ]:
                 results.append(df.HistoBoost(name, [axis], [col, "weight"]))
 
@@ -1077,12 +1195,7 @@ def build_graph(df, dataset):
             df.HistoBoost(
                 "nominal_muonScaleSyst_responseWeights",
                 d0_axes,
-                [
-                    "K_CVH_eta0",
-                    "mRK",
-                    "D0_mass",
-                    "nominal_muonScaleSyst_responseWeights_tensor",
-                ],
+                coord_cols + ["nominal_muonScaleSyst_responseWeights_tensor"],
                 tensor_axes=data_jpsi_crctn_unc_helper.tensor_axes,
                 storage=hist.storage.Double(),
             )
@@ -1103,10 +1216,12 @@ def build_graph(df, dataset):
                     "pi_charge0",
                     "D0_mass",
                     "mRK",
+                    "mRpi",
                 ],
             )
             df = df.Define("d0_scale_var_mass", "d0_scale_var.mass")
             df = df.Define("d0_scale_var_mRK", "d0_scale_var.mRK")
+            df = df.Define("d0_scale_var_mRpi", "d0_scale_var.mRpi")
             df = df.Define(
                 "d0_scale_var_idx",
                 f"wrem::d0::scale_var_indices({manual_scale_axes[0].size})",
@@ -1115,14 +1230,28 @@ def build_graph(df, dataset):
                 "d0_scale_updown",
                 f"wrem::d0::updown_coords({manual_scale_axes[0].size})",
             )
+            # Coordinate columns matching d0_axes: the varied observables (mRK, mRpi,
+            # D0 mass) are per-variation RVecs; etaK/etaPi are fixed per-event scalars.
+            if args.pionTemplateAxes:
+                manual_coord_cols = [
+                    "K_CVH_eta0",
+                    "d0_scale_var_mRK",
+                    "pi_CVH_eta0",
+                    "d0_scale_var_mRpi",
+                    "d0_scale_var_mass",
+                ]
+            else:
+                manual_coord_cols = [
+                    "K_CVH_eta0",
+                    "d0_scale_var_mRK",
+                    "d0_scale_var_mass",
+                ]
             results.append(
                 df.HistoBoost(
                     "nominal_muonScaleSyst_manual",
                     d0_axes + manual_scale_axes,
-                    [
-                        "K_CVH_eta0",
-                        "d0_scale_var_mRK",
-                        "d0_scale_var_mass",
+                    manual_coord_cols
+                    + [
                         "d0_scale_var_idx",
                         "d0_scale_updown",
                         "nominal_weight",
@@ -1135,7 +1264,7 @@ def build_graph(df, dataset):
             df,
             d0_axes,
             results,
-            ["K_CVH_eta0", "mRK", "D0_mass"],
+            coord_cols,
             smearing_uncertainty_helper,
             "scale",
             storage_type=hist.storage.Double(),
