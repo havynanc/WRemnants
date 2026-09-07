@@ -1079,9 +1079,8 @@ def data_selection():
         "chi2_piK0 > 0.0",
         "chi2_D0pis0 > 0.0",
         "std::fabs(D0_fit_mass_for_selection - 1.86483) < 0.035",
-        "pis_dR_D00 < 0.12",
+        "pis_dR_D00 < 0.16",
         "Dst_pt0 > 5.0",
-        "Dst_iso0 > 0.20",
     ]
     if args.pvalCut is not None:
         # Guard against the unfilled -99 sentinel: reject a candidate only when its
