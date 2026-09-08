@@ -146,6 +146,21 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--onnxReweightFile",
+    type=str,
+    default=os.path.join(
+        common.data_dir,
+        "calibration",
+        "shift_smear_reweight_mlp_factored_combined_kpi.onnx",
+    ),
+    help=(
+        "ONNX shift+smear reweight model used for the scale and resolution "
+        "variations (--muonScaleVariation onnxReweight). Defaults to the "
+        "K/pi-trained '_kpi' model; the same file is used for both the scale "
+        "and resolution reweight helpers."
+    ),
+)
+parser.add_argument(
     "--etaBins",
     type=int,
     default=None,
@@ -389,6 +404,7 @@ resolution_diff_weights_helper = (
     smearing=not args.noSmearing,
     fit_muon_scale=args.fitMuonScaleAndResolution,
     variation_eta_bins=args.etaBins,
+    onnx_path=args.onnxReweightFile,
     reweight_mass=[M_K, M_PI],
     # "condition" mode: keep the reweight columns real and floor the gen pt only for
     # the network's conditioning input, inside the helper. Off for "rescale"/no-sat.
@@ -413,6 +429,7 @@ _smearing_helper, smearing_uncertainty_helper = (
         parameter_variations=True,
         fit_muon_resolution=args.fitMuonScaleAndResolution,
         variation_eta_bins=args.etaBins,
+        onnx_path=args.onnxReweightFile,
         resolution_prefit_uncertainties=[
             args.resolutionPrefitUncertaintyA or args.resolutionPrefitUncertainty,
             args.resolutionPrefitUncertainty,
@@ -852,7 +869,7 @@ def require_layer_correction_schema(df, dataset):
 def add_layer_correction_diagnostics(df, results, dataset):
     dataset_label = "data" if dataset.is_data else "mc"
     diagnostic_specs = [
-        ("D0", "D0_mass", "D0_mass_layer", axis_D0mass),
+        ("D0", "D0_mass", "D0_mass_layer", d0_axes[-1]),
         ("mRK", "mRK", "mRK_layer", axis_diag_mRK),
         ("etaK", "K_CVH_eta0", "K_layer_eta", axis_diag_eta),
         ("K_pt", "K_CVH_pt0", "K_layer_pt", axis_diag_pt),

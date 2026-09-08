@@ -108,6 +108,7 @@ def make_jpsi_crctn_helpers(
     variation_eta_bins=None,
     reweight_mass=None,
     cond_pt_gen_min=None,
+    onnx_path=None,
 ):
     if muon_corr_mc in ["idealMC_massfit", "idealMC_lbltruth_massfit"]:
         mc_corrfile = calib_filepaths["mc_corrfile"][muon_corr_mc]
@@ -145,6 +146,7 @@ def make_jpsi_crctn_helpers(
                 variation_eta_bins=variation_eta_bins,
                 reweight_mass=reweight_mass,
                 cond_pt_gen_min=cond_pt_gen_min,
+                onnx_path=onnx_path,
             )
             if mc_corrfile
             else None
@@ -165,6 +167,7 @@ def make_jpsi_crctn_helpers(
                 variation_eta_bins=variation_eta_bins,
                 reweight_mass=reweight_mass,
                 cond_pt_gen_min=cond_pt_gen_min,
+                onnx_path=onnx_path,
             )
             if data_corrfile
             else None
