@@ -5,7 +5,11 @@ import numpy as np
 import ROOT
 
 import narf
-from wremnants.production import muon_calibration, upsilon_trigger_selection
+from wremnants.production import (
+    muon_calibration,
+    upsilon_trigger_selection,
+    upsilon_v_reweighting,
+)
 from wremnants.production.histmaker_tools import write_analysis_output
 from wremnants.utilities import common, parsing
 from wums import logging
@@ -185,6 +189,14 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--upsilonVReweightFile",
+    default=None,
+    help=(
+        "Apply category-specific Upsilon kinematic weights from this HDF5 "
+        "payload to simulation. Requires --upsilonTriggerSelection."
+    ),
+)
+parser.add_argument(
     "--resolutionPrefitUncertainty",
     type=float,
     default=0.3,
@@ -232,6 +244,12 @@ if args.makeUpsilonVReweightInputs and args.upsilonTriggerSelection is None:
     raise ValueError(
         "--makeUpsilonVReweightInputs requires --upsilonTriggerSelection"
     )
+if args.upsilonVReweightFile is not None and args.upsilonTriggerSelection is None:
+    raise ValueError("--upsilonVReweightFile requires --upsilonTriggerSelection")
+if args.upsilonVReweightFile is not None and args.makeUpsilonVReweightInputs:
+    raise ValueError(
+        "--upsilonVReweightFile and --makeUpsilonVReweightInputs are mutually exclusive"
+    )
 if args.etaBins is not None and not args.fitMuonScaleAndResolution:
     raise ValueError(
         "--etaBins currently requires --fitMuonScaleAndResolution so scale "
@@ -247,6 +265,16 @@ if not all(trig in possible_triggers for trig in selected_triggers):
     )
 
 logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
+
+upsilon_v_reweight_helpers = None
+if args.upsilonVReweightFile is not None:
+    upsilon_v_reweight_helpers = upsilon_v_reweighting.make_helpers(
+        args.upsilonVReweightFile, args.upsilonTriggerSelection
+    )
+    logger.info(
+        f"Loaded Upsilon V weights for selection "
+        f"'{args.upsilonTriggerSelection}' from {args.upsilonVReweightFile}"
+    )
 
 
 def read_AeM_corrections(fitresult_path, n_eta_bins=24):
@@ -832,6 +860,17 @@ def build_graph(df, dataset):
                 )
             )
 
+    if not dataset.is_data and upsilon_v_reweight_helpers is not None:
+        correction_helper, usable_helper, _ = upsilon_v_reweight_helpers
+        df = upsilon_v_reweighting.define_weights(
+            df, correction_helper, usable_helper
+        )
+        results.append(
+            upsilon_v_reweighting.book_coverage(df, args.upsilonTriggerSelection)
+        )
+    else:
+        df = df.Define("analysis_weight", "weight")
+
     df, hist_axes, calibration_cols = calibration_axes_and_cols(
         df,
         dataset,
@@ -875,13 +914,13 @@ def build_graph(df, dataset):
         df.HistoBoost(
             hist_name,
             hist_axes,
-            [*calibration_cols, "weight"],
+            [*calibration_cols, "analysis_weight"],
         )
     )
 
     if not dataset.is_data:
         df = (
-            df.Define("nominal_weight", "weight")
+            df.Define("nominal_weight", "analysis_weight")
             .Define(
                 "scale_recoPt",
                 f"ROOT::VecOps::RVec<float>{{float({reco_cols['plus_pt']}), float({reco_cols['minus_pt']})}}",
