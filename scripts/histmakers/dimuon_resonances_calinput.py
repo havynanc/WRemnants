@@ -176,6 +176,15 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--makeUpsilonVReweightInputs",
+    action="store_true",
+    help=(
+        "Write a fine-binned (category, ptll, yll, cosThetaStarll) histogram "
+        "for deriving category-specific Upsilon kinematic weights. Requires "
+        "--upsilonTriggerSelection."
+    ),
+)
+parser.add_argument(
     "--resolutionPrefitUncertainty",
     type=float,
     default=0.3,
@@ -219,6 +228,10 @@ if sum([args.quantile4D, args.quantile5D, args.quantileMass]) > 1:
     )
 if args.upsilonTriggerSelection is not None and args.resonance != "upsilon":
     raise ValueError("--upsilonTriggerSelection requires --resonance upsilon")
+if args.makeUpsilonVReweightInputs and args.upsilonTriggerSelection is None:
+    raise ValueError(
+        "--makeUpsilonVReweightInputs requires --upsilonTriggerSelection"
+    )
 if args.etaBins is not None and not args.fitMuonScaleAndResolution:
     raise ValueError(
         "--etaBins currently requires --fitMuonScaleAndResolution so scale "
@@ -812,6 +825,12 @@ def build_graph(df, dataset):
             df, reco_cols, args.upsilonTriggerSelection
         )
         df = df.Filter("upsilon_trigger_category >= 0")
+        if args.makeUpsilonVReweightInputs:
+            results.append(
+                upsilon_trigger_selection.book_v_reweight_input(
+                    df, args.upsilonTriggerSelection
+                )
+            )
 
     df, hist_axes, calibration_cols = calibration_axes_and_cols(
         df,

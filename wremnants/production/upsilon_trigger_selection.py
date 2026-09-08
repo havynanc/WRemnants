@@ -6,6 +6,9 @@ Upsilon triggers. They are deliberately independent of histogram booking and
 weight construction so the same definitions can be reused in both steps.
 """
 
+import hist
+import numpy as np
+
 SELECTIONS = (
     "inclusive_or",
     "muon_eta",
@@ -126,6 +129,45 @@ def define_columns(df, columns, selection):
             "upsilon_barrel_dimuon_rapidity && upsilon_barrel_delta_eta)",
         )
         .Define("upsilon_trigger_category", category_expression(selection))
+    )
+
+
+def book_v_reweight_input(df, selection, weight_column="weight"):
+    """Book fine-binned inputs from which category-specific maps are derived."""
+
+    labels = category_labels(selection)
+    axes = [
+        hist.axis.Integer(
+            0,
+            len(labels),
+            name="triggerCategory",
+            underflow=False,
+            overflow=False,
+            metadata={"selection": selection, "labels": labels},
+        ),
+        hist.axis.Variable(
+            np.round(np.arange(DIMUON_PT_MIN, 100.0001, 0.5), 8),
+            name="ptll",
+        ),
+        hist.axis.Variable(
+            np.round(np.arange(-MUON_ETA_MAX, MUON_ETA_MAX + 0.0001, 0.05), 8),
+            name="yll",
+        ),
+        hist.axis.Variable(
+            np.round(np.arange(-1.0, 1.0001, 0.05), 8),
+            name="cosThetaStarll",
+        ),
+    ]
+    return df.HistoBoost(
+        "upsilonTriggerVReweightInput",
+        axes,
+        [
+            "upsilon_trigger_category",
+            "upsilon_ptll",
+            "upsilon_yll",
+            "upsilon_costheta",
+            weight_column,
+        ],
     )
 
 
