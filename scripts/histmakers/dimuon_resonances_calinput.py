@@ -5,7 +5,7 @@ import numpy as np
 import ROOT
 
 import narf
-from wremnants.production import muon_calibration
+from wremnants.production import muon_calibration, upsilon_trigger_selection
 from wremnants.production.histmaker_tools import write_analysis_output
 from wremnants.utilities import common, parsing
 from wums import logging
@@ -165,6 +165,17 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--upsilonTriggerSelection",
+    choices=upsilon_trigger_selection.SELECTIONS,
+    default=None,
+    help=(
+        "Apply a trigger-motivated Upsilon selection. The inclusive_or choice "
+        "selects the HLT_Dimuon8_Upsilon_Barrel or HLT_Dimuon13_Upsilon OR. "
+        "The other choices retain mutually exclusive barrel and high-pT "
+        "categories routed by the requested geometry definition."
+    ),
+)
+parser.add_argument(
     "--resolutionPrefitUncertainty",
     type=float,
     default=0.3,
@@ -206,6 +217,8 @@ if sum([args.quantile4D, args.quantile5D, args.quantileMass]) > 1:
     raise ValueError(
         "--quantile4D, --quantile5D, and --quantileMass are mutually exclusive"
     )
+if args.upsilonTriggerSelection is not None and args.resonance != "upsilon":
+    raise ValueError("--upsilonTriggerSelection requires --resonance upsilon")
 if args.etaBins is not None and not args.fitMuonScaleAndResolution:
     raise ValueError(
         "--etaBins currently requires --fitMuonScaleAndResolution so scale "
@@ -415,6 +428,25 @@ resonance_options = {
 }
 
 cfg = resonance_options[args.resonance]
+if args.upsilonTriggerSelection is not None:
+    cfg = {
+        **cfg,
+        "default_eta_bins": 24,
+        "eta_range": (
+            -upsilon_trigger_selection.MUON_ETA_MAX,
+            upsilon_trigger_selection.MUON_ETA_MAX,
+        ),
+        "mass_axis": hist.axis.Regular(
+            80,
+            upsilon_trigger_selection.MASS_MIN,
+            upsilon_trigger_selection.MASS_MAX,
+            name="mass",
+        ),
+        "mass_range": (
+            upsilon_trigger_selection.MASS_MIN,
+            upsilon_trigger_selection.MASS_MAX,
+        ),
+    }
 eta_bins = args.etaBins or cfg["default_eta_bins"]
 eta_min, eta_max = cfg["eta_range"]
 mass_axis = cfg["mass_axis"]
@@ -774,6 +806,12 @@ def build_graph(df, dataset):
             "Jpsigen_mass > 0.0 && Muplusgen_pt > 0.0 && Muminusgen_pt > 0.0"
         )
     df = df.Filter(bool_filter(channel["cut"]))
+
+    if args.upsilonTriggerSelection is not None:
+        df = upsilon_trigger_selection.define_columns(
+            df, reco_cols, args.upsilonTriggerSelection
+        )
+        df = df.Filter("upsilon_trigger_category >= 0")
 
     df, hist_axes, calibration_cols = calibration_axes_and_cols(
         df,
