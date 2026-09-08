@@ -17,6 +17,7 @@ from wremnants.production import (
     generator_level_definitions,
     muon_calibration,
     muon_efficiencies_binned,
+    muon_efficiencies_cvh,
     muon_efficiencies_newVeto,
     muon_efficiencies_smooth,
     muon_efficiencies_veto,
@@ -311,13 +312,13 @@ axis_mtCat = hist.axis.Variable(
     ),
     name="mt",
     underflow=False,
-    overflow=True,
+    overflow=False,
 )
 axis_isoCat = hist.axis.Variable(
     binning.get_binning_fakes_relIso(high_iso_bins=False),
     name="relIso",
     underflow=False,
-    overflow=True,
+    overflow=False,
 )
 axes_abcd = [axis_mtCat, axis_isoCat]
 
@@ -448,9 +449,15 @@ if args.unfolding:
             args.fitresult, channel="ch1_masked"
         )
 
-theory_helpers_procs = theory_corrections.make_theory_helpers(
-    args.pdfs, args.theoryCorr, procs=["Z", "W"]
-)
+if args.skipByHelicityCorrection:
+    helicity_smoothing_helpers_procs = {}
+else:
+    helicity_smoothing_helpers_procs = (
+        theory_corrections.make_helicity_smoothing_helpers(
+            args.pdfs, args.theoryCorr, procs=["Z", "W"]
+        )
+    )
+
 
 if args.theoryAgnostic:
     theoryAgnostic_axes, theoryAgnostic_cols = binning.get_theoryAgnostic_axes(
@@ -734,11 +741,8 @@ def build_graph(df, dataset):
     isW = dataset.group in ["Wmunu", "Wtaunu"]
     isBSM = dataset.name.startswith("WtoNMu")
     isWmunu = isBSM or dataset.group in ["Wmunu"]
-    isZ = dataset.group in [
-        "Zmumu",
-        "Ztautau",
-    ]
-    isZveto = isZ or dataset.group in ["DYlowMass"]
+    isZ = dataset.group in ["Zmumu", "Ztautau"]
+    isZmumu = dataset.group in ["Zmumu"]
     isWorZ = isW or isZ
     isTop = dataset.group == "Top"
     isQCDMC = dataset.group == "QCD"
@@ -747,9 +751,11 @@ def build_graph(df, dataset):
         hist.storage.Double()
     )  # turn off sum weight square for systematic histograms
 
-    theory_helpers = {}
+    helicity_smoothing_helpers = {}
     if isWorZ:
-        theory_helpers = theory_helpers_procs[dataset.name[0]]
+        label = dataset.name[0] if isW else "Z"
+        if label in helicity_smoothing_helpers_procs.keys():
+            helicity_smoothing_helpers = helicity_smoothing_helpers_procs[label]
 
     # disable auxiliary histograms when unfolding to reduce memory consumptions, or when doing the original theory agnostic without --poiAsNoi
     auxiliary_histograms = True
@@ -849,7 +855,7 @@ def build_graph(df, dataset):
             args,
             dataset.name,
             corr_helpers,
-            theory_helpers,
+            helicity_smoothing_helpers,
             [],
             [],
             base_name="gen",
@@ -906,7 +912,7 @@ def build_graph(df, dataset):
                         args,
                         dataset.name,
                         corr_helpers,
-                        theory_helpers,
+                        helicity_smoothing_helpers,
                         [a for a in unfolding_axes[level] if a.name != "acceptance"],
                         [
                             c
@@ -927,7 +933,7 @@ def build_graph(df, dataset):
                         args,
                         dataset.name,
                         corr_helpers,
-                        theory_helpers,
+                        helicity_smoothing_helpers,
                         [a for a in unfolding_axes[level] if a.name != "acceptance"],
                         [
                             c
@@ -941,21 +947,19 @@ def build_graph(df, dataset):
                         cols = [*nominal_cols, *unfolding_cols[level]]
                         break
 
-        elif dataset.name == "Zmumu_2016PostVFP":
-            if args.unfolding and dataset.name == "Zmumu_2016PostVFP":
-                df = unfolder_z.add_gen_histograms(
-                    args, df, results, dataset, corr_helpers, theory_helpers
-                )
-
-                if not unfolder_z.poi_as_noi:
-                    axes = [
-                        *nominal_axes,
-                        *unfolder_z.unfolding_axes[unfolder_z.unfolding_levels[-1]],
-                    ]
-                    cols = [
-                        *nominal_cols,
-                        *unfolder_z.unfolding_cols[unfolder_z.unfolding_levels[-1]],
-                    ]
+        elif isZmumu:
+            df = unfolder_z.add_gen_histograms(
+                args, df, results, dataset, corr_helpers, helicity_smoothing_helpers
+            )
+            if not unfolder_z.poi_as_noi:
+                axes = [
+                    *nominal_axes,
+                    *unfolder_z.unfolding_axes[unfolder_z.unfolding_levels[-1]],
+                ]
+                cols = [
+                    *nominal_cols,
+                    *unfolder_z.unfolding_cols[unfolder_z.unfolding_levels[-1]],
+                ]
 
     if isWorZ:
         df = generator_level_definitions.define_prefsr_vars(df)
@@ -1008,15 +1012,35 @@ def build_graph(df, dataset):
         df, cvh_helper, jpsi_helper, args, dataset, smearing_helper, bias_helper
     )
 
+    if args.cvhBadModules == "veto":
+        # CVH refit efficiency holes (badly aligned modules, incl. TIB-L2 detId
+        # 369141860): remove the affected (eta,phi') rectangles from data and MC
+        # alike, so the data-only refit inefficiency needs no correction.
+        df = muon_efficiencies_cvh.apply_bad_module_veto(
+            df, ptCut=args.vetoRecoPt, etaCut=args.vetoRecoEta
+        )
+
+    # simulate the dimuon events that leak into the single-muon selection in
+    # data because the second muon's CVH refit failed. The veto muon it declares
+    # lost has to be gone before the 'exactly one veto muon' requirement and
+    # before select_good_muons, which builds on the veto collection, so the
+    # filter is deferred by one step here. MC only: in data the muon really is
+    # missing from vetoMuons already. See muon_efficiencies_cvh.hpp
+    cvhVetoLeak = args.cvhBadModules == "sf" and not dataset.is_data
+
     df = muon_selections.select_veto_muons(
         df,
-        nMuons=1,
+        nMuons=-1 if cvhVetoLeak else 1,
         ptCut=args.vetoRecoPt,
         etaCut=args.vetoRecoEta,
         staPtCut=args.vetoRecoStaPt,
         dxybsCut=args.dxybsVeto if args.dxybsVeto > 0 else args.dxybs,
         useGlobalOrTrackerVeto=useGlobalOrTrackerVeto,
     )
+    if cvhVetoLeak:
+        df, _ = muon_efficiencies_cvh.define_cvh_veto_leak(df)
+        df = df.Filter("Sum(vetoMuons) == 1", "oneVetoMuonAfterCvhLeak")
+
     df = muon_selections.select_good_muons(
         df,
         template_minpt,
@@ -1153,9 +1177,26 @@ def build_graph(df, dataset):
                 "wrem::unmatched_postfsrMuon_var(GenPart_eta[postfsrMuons_inAcc], GenPart_pt[postfsrMuons_inAcc], hasMatchDR2idx)",
             )
             df = df.Define(
-                f"vetoMuons_tnpCharge0",
+                f"vetoMuons_tnpCharge0_preCvhLeak",
                 "wrem::unmatched_postfsrMuon_var(GenPart_charge, GenPart_pt[postfsrMuons_inAcc], hasMatchDR2idx)",
             )
+            if cvhVetoLeak:
+                # in a leaking event the second gen muon *was* reconstructed and
+                # did pass the veto; it is only missing from vetoMuons because we
+                # declared its refit failed. The (anti-)veto SF corrects the
+                # probability of not reconstructing it, which is not what
+                # happened here, so it must not be applied -- nor the DY veto
+                # fraction scaling, which addresses the same population. Flagging
+                # the event as having no unmatched gen muon switches off both,
+                # and their systematic variations with them.
+                df = df.Define(
+                    f"vetoMuons_tnpCharge0",
+                    "cvhVetoLeak_index >= 0 ? -99 : vetoMuons_tnpCharge0_preCvhLeak",
+                )
+            else:
+                df = df.Alias(
+                    f"vetoMuons_tnpCharge0", f"vetoMuons_tnpCharge0_preCvhLeak"
+                )
     if isQCDMC:
         df = generator_level_definitions.define_postfsr_vars(df)
         df = df.Filter(
@@ -1248,6 +1289,15 @@ def build_graph(df, dataset):
         if not args.noVertexWeight:
             weight_expr += "*weight_vtx"
 
+        if cvhVetoLeak:
+            # probability of the branch kept by define_cvh_veto_leak above: 1 for
+            # the ordinary events, 1 - SF_cvh for the dimuon ones that leak into
+            # this selection. Not gated on --noScaleFactors, unlike weight_cvhSF
+            # below: the events were let through the veto on the strength of this
+            # weight, so dropping it would leave them here at full weight. The
+            # survival factor of the muon that is kept comes from weight_cvhSF.
+            weight_expr += "*weight_cvhVetoLeak"
+
         # for tests to split into number of reconstructed vertices
         if args.addNvtxAxis is not None and args.normWeightNvtx is not None:
             df = define_norm_weight_nRecoVtx(df, args.addNvtxAxis, args.normWeightNvtx)
@@ -1300,7 +1350,25 @@ def build_graph(df, dataset):
             )
             weight_expr += "*weight_fullMuonSF_withTrackingReco"
 
-            if isZveto and not args.noGenMatchMC:
+            if args.cvhBadModules == "sf":
+                # alternative to the geometric veto applied above: downweight MC
+                # in the affected (eta,phi') cells by the measured data/MC
+                # efficiency ratio. See muon_efficiencies_cvh.hpp; charge/pt undo
+                # the track bending. Single W muon.
+                df, _ = muon_efficiencies_cvh.define_cvh_weight(
+                    df,
+                    [
+                        (
+                            "goodMuons_eta0",
+                            "goodMuons_phi0",
+                            "goodMuons_charge0",
+                            "goodMuons_pt0",
+                        )
+                    ],
+                )
+                weight_expr += "*weight_cvhSF"
+
+            if isZ and not args.noGenMatchMC:
                 if args.scaleDYvetoFraction > 0.0:
                     # weight different from 1 only for events with >=2 gen muons in acceptance but only 1 reco muon
                     df = df.Define(
@@ -1355,7 +1423,11 @@ def build_graph(df, dataset):
         logger.debug(f"Exp weight defined: {weight_expr}")
         df = df.Define("exp_weight", weight_expr)
         df = theory_corrections.define_theory_weights_and_corrs(
-            df, dataset.name, corr_helpers, args, theory_helpers=theory_helpers
+            df,
+            dataset.name,
+            corr_helpers,
+            args,
+            helicity_smoothing_helpers=helicity_smoothing_helpers,
         )
 
         if (
@@ -2322,7 +2394,7 @@ def build_graph(df, dataset):
                         step=es,
                         storage_type=storage_type,
                     )
-                if isZveto and not args.noGenMatchMC and not args.noVetoSF:
+                if isZ and not args.noGenMatchMC and not args.noVetoSF:
                     df = systematics.add_muon_efficiency_veto_unc_hists(
                         results,
                         df,
@@ -2365,7 +2437,7 @@ def build_graph(df, dataset):
                 args,
                 dataset.name,
                 corr_helpers,
-                theory_helpers,
+                helicity_smoothing_helpers,
                 axes,
                 cols,
                 for_wmass=True,

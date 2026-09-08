@@ -88,6 +88,11 @@ class Datagroups(object):
         # with option --select in setupRabbit.py or --presel in makeDataMCStackPlot.py,
         # which slice and remove the axis
         self.histAxesRemovedBeforeFakes = []
+        # axes for which under-/overflow bins are turned into explicit bins right
+        # after reading, see 'hh.flowToExplicitBins'. Needed for histograms from
+        # older histmakers, which stored the open ended ABCD regions in the overflow
+        # bin instead of an explicit last bin, since flow bins can not be used in the fit
+        self.flowToExplicitBinsAxes = []
 
         self.setGenAxes()
 
@@ -143,6 +148,13 @@ class Datagroups(object):
         # pattern may match a given var_name; overlapping matches raise
         # ValueError.
         self.scale_params_patterns = []
+
+        # List of compiled regex patterns. For each systematic variation
+        # written via addSystematic, if its per-direction name matches any
+        # pattern (re.search), the Gaussian prior on that nuisance is
+        # removed (noConstraint=True). Mirrors the --scaleParams /
+        # --noSymmetrize wiring.
+        self.no_constraint_patterns = []
 
         self.writer = None
 
@@ -301,6 +313,24 @@ class Datagroups(object):
                 "histselectors only implemented for single lepton (with fakes)"
             )
             return  # histselectors only implemented for single lepton (with fakes)
+
+        if mode in ["none", None]:
+            g = self.fakeName
+            members = self.groups[g].members[:]
+            if len(members) == 0:
+                raise RuntimeError(f"No member found for group {g}")
+            base_member = members[0].name
+            h = hh.flowToExplicitBins(
+                self.results[base_member]["output"][histToRead].get(),
+                self.flowToExplicitBinsAxes,
+            )
+            if forceGlobalScaleFakes is not None:
+                scale = forceGlobalScaleFakes
+            else:
+                scale = 0.85
+            self.groups[g].histselector = sel.OnesSelector(h, global_scalefactor=scale)
+            return
+
         auxiliary_info = {"ABCDmode": mode}
         signalselector = sel.SignalSelectorABCD
         scale = 1
@@ -345,7 +375,10 @@ class Datagroups(object):
             if len(members) == 0:
                 raise RuntimeError(f"No member found for group {g}")
             base_member = members[0].name
-            h = self.results[base_member]["output"][histToRead].get()
+            h = hh.flowToExplicitBins(
+                self.results[base_member]["output"][histToRead].get(),
+                self.flowToExplicitBinsAxes,
+            )
             if g in fake_processes and mode.lower() != "mc":
                 self.groups[g].histselector = fakeselector(
                     h,
@@ -376,7 +409,10 @@ class Datagroups(object):
                             "Histogram 'unweighted' not found, continue without fake correction"
                         )
                         return
-                    hQCD = self.results[histname_qcd_mc]["output"]["unweighted"].get()
+                    hQCD = hh.flowToExplicitBins(
+                        self.results[histname_qcd_mc]["output"]["unweighted"].get(),
+                        self.flowToExplicitBinsAxes,
+                    )
                     self.groups[g].histselector.set_correction(hQCD, axes_names=mcCorr)
             else:
                 self.groups[g].histselector = signalselector(
@@ -1132,7 +1168,7 @@ class Datagroups(object):
         if isinstance(h, wums.ioutils.H5PickleProxy):
             h = h.get()
 
-        return h
+        return hh.flowToExplicitBins(h, self.flowToExplicitBinsAxes)
 
     def addProcessGroup(self, name, startsWith=[], excludeMatch=[]):
         procFilter = lambda x: (
@@ -1391,7 +1427,9 @@ class Datagroups(object):
             else:
                 name = histname
 
-        logger.info(f"Now in channel {self.channel} at shape systematic group {name}")
+        logger.info(
+            f"Now in channel {self.channel} at shape systematic group {name} (constraint: {not noConstraint})"
+        )
 
         if self.isExcludedNuisance(name):
             return
@@ -1522,6 +1560,18 @@ class Datagroups(object):
                         f"{effective_scale} (pattern '{pat.pattern}' x {fac})"
                     )
 
+                # --noConstrainParams: remove Gaussian prior for matching
+                # nuisances. Mirrors --scaleParams / --noSymmetrize.
+                effective_noConstraint = noConstraint
+                no_const_patterns = getattr(self, "no_constraint_patterns", [])
+                nc_matched = [p for p in no_const_patterns if p.search(var_name)]
+                if nc_matched and not noConstraint:
+                    effective_noConstraint = True
+                    logger.info(
+                        f"noConstrainParams: removing prior on {var_name} "
+                        f"(pattern(s) {[p.pattern for p in nc_matched]})"
+                    )
+
                 if lastAction is not None:
                     if lastActionRequiresNomi:
                         hnom = self.groups[proc].hists[self.nominalName]
@@ -1546,7 +1596,7 @@ class Datagroups(object):
                     symmetrize=effective_symmetrize,
                     kfactor=effective_scale,
                     noi=noi,
-                    constrained=not noConstraint,
+                    constrained=not effective_noConstraint,
                     add_to_data_covariance=self.isAbsorbedNuisance(name),
                 )
 

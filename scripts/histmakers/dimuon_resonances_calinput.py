@@ -183,18 +183,6 @@ parser.add_argument(
         "is used for a, b, c, and d."
     ),
 )
-parser.add_argument(
-    "--nonUltraRelativisticReweight",
-    action="store_true",
-    help=(
-        "Use the non-ultra-relativistic (mass-aware) energy-loss correction in the "
-        "ONNX scale reweight, evaluated with the muon mass for both muons. The e "
-        "variation then treats e as a total-energy shift (finite, asymmetric "
-        "down/up shifts with the 1/(beta*cosh(eta)) factor) instead of the "
-        "ultra-relativistic linear approximation. Only affects "
-        "--muonScaleVariation onnxReweight."
-    ),
-)
 parser = parsing.set_parser_default(parser, "theoryCorr", [])
 parser = parsing.set_parser_default(parser, "scale_A", 5.0)
 parser = parsing.set_parser_default(parser, "scale_e", 5.0)
@@ -303,12 +291,11 @@ resolution_diff_weights_helper = (
     smearing=not args.noSmearing,
     fit_muon_scale=args.fitMuonScaleAndResolution,
     variation_eta_bins=args.etaBins,
-    # Per-leg masses for the mass-aware energy-loss term; both legs are muons
-    # (wrem::muon_mass = 0.1056583745 GeV). None keeps the ultra-relativistic
-    # (massless) reweight.
+    # Use mass-aware propagation by default for ONNX reweighting; non-ONNX
+    # methods receive None because their helpers do not consume reweight_mass.
     reweight_mass=(
         [0.1056583745, 0.1056583745]
-        if args.nonUltraRelativisticReweight
+        if args.muonScaleVariation == "onnxReweight"
         else None
     ),
 )
@@ -327,8 +314,7 @@ _smearing_helper, smearing_uncertainty_helper = (
         fit_muon_resolution=args.fitMuonScaleAndResolution,
         variation_eta_bins=args.etaBins,
         resolution_prefit_uncertainties=[
-            args.resolutionPrefitUncertaintyA
-            or args.resolutionPrefitUncertainty,
+            args.resolutionPrefitUncertaintyA or args.resolutionPrefitUncertainty,
             args.resolutionPrefitUncertainty,
             args.resolutionPrefitUncertainty,
             args.resolutionPrefitUncertainty,
@@ -454,9 +440,21 @@ else:
 calibration_axes = [
     hist.axis.Regular(eta_bins, eta_min, eta_max, name="eta1"),
     hist.axis.Regular(eta_bins, eta_min, eta_max, name="eta2"),
-    pt1_axis if args.ptBinEdges is None else hist.axis.Variable(args.ptBinEdges, name="pt1"),
-    pt2_axis if args.ptBinEdges is None else hist.axis.Variable(args.ptBinEdges, name="pt2"),
-    mass_axis if args.massBinEdges is None else hist.axis.Variable(args.massBinEdges, name="mass"),
+    (
+        pt1_axis
+        if args.ptBinEdges is None
+        else hist.axis.Variable(args.ptBinEdges, name="pt1")
+    ),
+    (
+        pt2_axis
+        if args.ptBinEdges is None
+        else hist.axis.Variable(args.ptBinEdges, name="pt2")
+    ),
+    (
+        mass_axis
+        if args.massBinEdges is None
+        else hist.axis.Variable(args.massBinEdges, name="mass")
+    ),
 ]
 
 quantile_kinematic_axes = [
@@ -584,13 +582,17 @@ def quantile_mass_output_axes_from_hists(centers_hist, volume_hist):
 
 def calibration_axes_and_cols(df, dataset, channel, cols):
     if not (args.quantile4D or args.quantile5D or args.quantileMass):
-        return df, calibration_axes, [
-            cols["plus_eta"],
-            cols["minus_eta"],
-            cols["plus_pt"],
-            cols["minus_pt"],
-            cols["mass"],
-        ]
+        return (
+            df,
+            calibration_axes,
+            [
+                cols["plus_eta"],
+                cols["minus_eta"],
+                cols["plus_pt"],
+                cols["minus_pt"],
+                cols["mass"],
+            ],
+        )
 
     channel_label = channel["label"]
     if args.quantile5D:
@@ -602,16 +604,12 @@ def calibration_axes_and_cols(df, dataset, channel, cols):
     dummy_col = (
         "quantile5d_dummy"
         if args.quantile5D
-        else "quantilemass_dummy"
-        if args.quantileMass
-        else "quantile4d_dummy"
+        else "quantilemass_dummy" if args.quantileMass else "quantile4d_dummy"
     )
     dummy_axis = (
         quantile_5d_dummy_axis
         if args.quantile5D
-        else quantile_mass_dummy_axis
-        if args.quantileMass
-        else quantile_dummy_axis
+        else quantile_mass_dummy_axis if args.quantileMass else quantile_dummy_axis
     )
     df = df.DefinePerSample(dummy_col, "0")
     quantile_input_cols = [
@@ -672,13 +670,17 @@ def calibration_axes_and_cols(df, dataset, channel, cols):
     if args.quantile5D:
         return df, output_axes, quantile_cols[1:]
     if args.quantileMass:
-        return df, output_axes, [
-            cols["plus_eta"],
-            cols["minus_eta"],
-            cols["plus_pt"],
-            cols["minus_pt"],
-            quantile_cols[-1],
-        ]
+        return (
+            df,
+            output_axes,
+            [
+                cols["plus_eta"],
+                cols["minus_eta"],
+                cols["plus_pt"],
+                cols["minus_pt"],
+                quantile_cols[-1],
+            ],
+        )
     return df, output_axes, [*quantile_cols[1:], cols["mass"]]
 
 

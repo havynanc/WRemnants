@@ -152,9 +152,9 @@ class HistselectorABCD(object):
         # or if abcdExplicitAxisEdges is provided from outside
         self.abcd_thresholds = {
             "pt": [26, 28, 30],
-            "mt": [0, 40] if self.ABCDmode == "simple" else [0, 20, 40],
+            "mt": [0, 40, np.inf] if self.ABCDmode == "simple" else [0, 20, 40, np.inf],
             "iso": [0, 4, 8, 12],
-            "relIso": [0, 0.15, 0.3, 0.45],
+            "relIso": [0, 0.15, 0.3, np.inf],
             "relJetLeptonDiff": [0, 0.2, 0.35, 0.5],
             "dxy": [0, 0.01, 0.02, 0.03],
         }
@@ -246,11 +246,18 @@ class HistselectorABCD(object):
         self.smoothing_axis_min = edges[0]
         self.smoothing_axis_max = edges[-1]
 
-    def get_selection_edges(self, axis_name, upper_bound=False, hist_axis_edges=None):
+    def get_selection_edges(self, axis_name, upper_bound=False, hist_axis=None):
         # returns edges from pass to fail regions [x0, x1, x2, x3] e.g. x=[x0,x1], dx=[x1,x2], d2x=[x2,x3]
         if axis_name in self.abcd_thresholds:
             ts = self.abcd_thresholds[axis_name]
-            if hist_axis_edges is not None:
+            if hist_axis is not None:
+                hist_axis_edges = list(hist_axis.edges)
+                # treat underflow / overflow as explicit edge with +/- np.inf
+                if hist_axis.traits.overflow:
+                    hist_axis_edges.append(np.inf)
+                if hist_axis.traits.underflow:
+                    hist_axis_edges.insert(0, -np.inf)
+
                 if len(ts) == len(hist_axis_edges):
                     # consistent number of edges: take them from axis
                     ts = [x for x in hist_axis_edges]
@@ -258,23 +265,18 @@ class HistselectorABCD(object):
                         f"ABCD method: using edges {ts} for axis {axis_name}"
                     )
                 elif len(ts) < len(hist_axis_edges):
-                    if all(tsi in hist_axis_edges for i, tsi in enumerate(ts)):
+                    if all(tsi in hist_axis_edges for tsi in ts):
                         # more edges in axis, but default ones are a subset: keep edges from default
                         logger.warning(
                             f"ABCD method: using subset of edges {ts} for axis {axis_name}, out of {hist_axis_edges}"
                         )
                     else:
-                        logger.warning(
-                            f"Axis {axis_name} has inconsistent edges ({hist_axis_edges}): expected {ts}"
-                        )
-                        logger.warning(
-                            f"Please, explicitly provide the edges to be used for ABCD method."
-                        )
-                        raise RuntimeError(
-                            f"Inconsistent edges for ABCD method with axis {axis_name}."
-                        )
+                        raise RuntimeError(f"""
+                            Axis {axis_name} has inconsistent edges ({hist_axis_edges}): expected {ts}.
+                            Please, explicitly provide the edges to use for ABCD method.
+                            """)
                 else:
-                    if all(xi in ts for i, xi in enumerate(hist_axis_edges)):
+                    if all(xi in ts for xi in hist_axis_edges):
                         # less edges in axis, but subset of default ones: use them filling remaining elements with None
                         ts = [x for x in hist_axis_edges]
                         ts.extend([None] * (len(ts) - len(hist_axis_edges)))
@@ -283,15 +285,10 @@ class HistselectorABCD(object):
                         )
                     else:
                         # less edges in axis but also inconsistent: request the user to explicitly provide what to use
-                        logger.warning(
-                            f"ABCD method: axis {axis_name} has less edges ({hist_axis_edges}) than expected ({ts})"
-                        )
-                        logger.warning(
-                            f"and inconsistent too. Please, explicitly provide the edges to use"
-                        )
-                        raise RuntimeError(
-                            f"Inconsistent edges for ABCD method with axis {axis_name}."
-                        )
+                        raise RuntimeError(f"""
+                            Axis {axis_name} has less edges ({hist_axis_edges}) than expected ({ts}) and inconsistent too. 
+                            Please, explicitly provide the edges to use for ABCD method.
+                            """)
 
             if axis_name in ["mt", "pt"]:
                 # low: failing, high: passing, no upper bound
@@ -357,7 +354,7 @@ class HistselectorABCD(object):
             self.sel_dx = 0
         else:
             x0, x1, x2, x3 = self.get_selection_edges(
-                self.name_x, hist_axis_edges=self.axis_x.edges
+                self.name_x, hist_axis=self.axis_x
             )
             s = hist.tag.Slicer()
             do = hist.sum if self.integrate_x else None
@@ -378,7 +375,7 @@ class HistselectorABCD(object):
             y0, y1, y2, y3 = self.get_selection_edges(
                 self.name_y,
                 upper_bound=self.upper_bound_y,
-                hist_axis_edges=self.axis_y.edges,
+                hist_axis=self.axis_y,
             )
             s = hist.tag.Slicer()
             self.sel_y = (
@@ -401,6 +398,83 @@ class SignalSelectorABCD(HistselectorABCD):
     # signal region selection
     def get_hist(self, h, is_nominal=False):
         return self.get_hist_passX_passY(h)
+
+
+class OnesSelector(HistselectorABCD):
+    """
+    Flat-ones fake template for the simultaneous (extended)ABCD fit, where the
+    rabbit model carries the absolute scale and per-region polynomial shape.
+    The (sel_x, sel_y) signal-region slice is scaled by 'global_scalefactor' as a closure-test
+    correction.
+
+    Setting ``external_params`` to a Chebyshev coefficient vector before calling
+    ``get_hist`` reweights the signal-region slice by
+    ``exp(sum_k p_k T_k(x_norm))`` along the smoothing axis on top of the
+    nominal scale, so a single non-zero coefficient produces a Param_k
+    systematic shape analogous to the polynomial-coefficient variations used
+    with FakeSelector*ExtendedABCD.
+    """
+
+    def __init__(
+        self,
+        h,
+        *args,
+        global_scalefactor=1,  # apply global correction factor on prediction
+        **kwargs,
+    ):
+        super().__init__(h, *args, **kwargs)
+        self.external_params = None
+        self.global_scalefactor = global_scalefactor
+
+    @staticmethod
+    def _uhi_to_numpy(sel, axis):
+        # hist UHI uses imaginary numbers for axis coordinates and hist.sum as
+        # a step to collapse the axis; numpy understands neither.
+        if isinstance(sel, slice):
+            start, stop = sel.start, sel.stop
+            if isinstance(start, complex):
+                start = axis.index(start.imag)
+            if isinstance(stop, complex):
+                stop = axis.index(stop.imag)
+            return slice(start, stop)
+        if isinstance(sel, complex):
+            return axis.index(sel.imag)
+        return sel
+
+    def _signal_region_slice(self, h):
+        sl = [slice(None)] * h.ndim
+        for name, sel in [(self.name_x, self.sel_x), (self.name_y, self.sel_y)]:
+            i = h.axes.name.index(name)
+            sl[i] = self._uhi_to_numpy(sel, h.axes[i])
+        return tuple(sl)
+
+    def _apply_cheb_reweight(self, h):
+        if self.external_params is None or not np.any(self.external_params):
+            return
+        edges = h.axes[self.smoothing_axis_name].edges
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        x_norm = (
+            2
+            * (centers - self.smoothing_axis_min)
+            / (self.smoothing_axis_max - self.smoothing_axis_min)
+            - 1
+        )
+        weight = np.exp(np.polynomial.chebyshev.chebval(x_norm, self.external_params))
+        sm_idx = h.axes.name.index(self.smoothing_axis_name)
+        bcast = [1] * h.ndim
+        bcast[sm_idx] = -1
+        sl = self._signal_region_slice(h)
+        h.values()[sl] *= weight.reshape(bcast)
+
+    # signal region selection
+    def get_hist(self, h, is_nominal=False):
+        h_new = h.copy()
+        h_new.values()[...] = 1.0
+        h_new.variances()[...] = 0.0
+        # Closure-test correction: scale the signal region template.
+        h_new.values()[self._signal_region_slice(h_new)] = self.global_scalefactor
+        self._apply_cheb_reweight(h_new)
+        return h_new
 
 
 class FakeSelectorSimpleABCD(HistselectorABCD):
@@ -810,6 +884,11 @@ class FakeSelectorSimpleABCD(HistselectorABCD):
         regressor.solve(x, y, w)
 
         logger.debug("Reduce is " + str(reduce))
+
+        # Always save params before (optional) reduction so the dump can access
+        # per-region polynomial coefficients for both signal_region=False and
+        # signal_region=True calls.
+        self._params_before_reduce = regressor.params.copy()
 
         if reduce:
             # add up parameters from smoothing of individual sideband regions
@@ -1320,9 +1399,7 @@ class FakeSelector1DExtendedABCD(FakeSelectorSimpleABCD):
 
     # set slices object for selection of sideband regions
     def set_selections_x(self, integrate_x=True):
-        x0, x1, x2, x3 = self.get_selection_edges(
-            self.name_x, hist_axis_edges=self.axis_x.edges
-        )
+        x0, x1, x2, x3 = self.get_selection_edges(self.name_x, hist_axis=self.axis_x)
         s = hist.tag.Slicer()
         do = hist.sum if integrate_x else None
         self.sel_x = (
@@ -1552,13 +1629,14 @@ class FakeSelector2DExtendedABCD(FakeSelector1DExtendedABCD):
                 # min and max (in application region) for transformation of bernstain polynomials into interval [0,1]
                 axis_x_min = h[{self.name_x: self.sel_x}].axes[self.name_x].edges[0]
                 if self.name_x == "mt":
-                    # mt does not have an upper bound, cap at 100
+                    # mt may extend to infinity; use the last finite edge for the regressor
                     edges = (
                         self.rebin_x
                         if self.rebin_x is not None
                         else h.axes[self.name_x].edges
                     )
-                    axis_x_max = extend_edges(h.axes[self.name_x].traits, edges)[-1]
+                    all_edges = extend_edges(h.axes[self.name_x].traits, edges)
+                    axis_x_max = all_edges[np.isfinite(all_edges)][-1]
                 elif self.name_x in ["iso", "relIso", "relJetLeptonDiff", "dxy"]:
                     # iso and dxy have a finite lower and upper bound in the application region
                     axis_x_max = self.abcd_thresholds[self.name_x][1]
@@ -1594,7 +1672,7 @@ class FakeSelector2DExtendedABCD(FakeSelector1DExtendedABCD):
         y0, y1, y2, y3 = self.get_selection_edges(
             self.name_y,
             upper_bound=self.upper_bound_y,
-            hist_axis_edges=self.axis_y.edges,
+            hist_axis=self.axis_y,
         )
         s = hist.tag.Slicer()
         self.sel_y = (
@@ -2150,3 +2228,185 @@ class FakeSelector2DExtendedABCD(FakeSelector1DExtendedABCD):
             dvar = c_scf**2 * frf_var + frf**2 * c_scf_var
 
         return d, dvar
+
+
+def is_simultaneous_abcd_fit(fitvar):
+    """Whether the extended ABCD regions are part of the fit rather than collapsed here.
+
+    With mt and relIso among the fit axes the ABCD relation is solved by rabbit's
+    param model, which is what makes the 'none' fake estimation and the stored
+    initial parameters the right defaults.
+    """
+    return "mt" in fitvar and "relIso" in fitvar
+
+
+def default_fake_estimation(args):
+    """Resolve --fakeEstimation when it was not given explicitly.
+
+    For the simultaneous ABCD fit the fakes have to be filled with a flat template so
+    that rabbit solves the ABCD relation itself, so 'none' is the only choice that
+    makes sense there; everywhere else the historical 'extended1D' still applies.
+    Resolved once from all channels, since the option is global.
+    """
+    if args.fakeEstimation is not None:
+        return args.fakeEstimation
+    if all(is_simultaneous_abcd_fit(fv.split("-")) for fv in args.fitvar):
+        return "none"
+    return "extended1D"
+
+
+def should_store_smoothing_params(args, fitvar):
+    """Whether to store initial parameters for the simultaneous ABCD param model.
+
+    Stored whenever they are needed, i.e. whenever the ABCD relation is left for the
+    fit to solve: the two ABCD axes are fit axes and the fakes are filled with a flat
+    template ('none' fake estimation, which is also the default in that case).
+    --noSmoothingParams opts out.
+    """
+    return (
+        not args.noSmoothingParams
+        and args.fakeEstimation in ["none", None]
+        and is_simultaneous_abcd_fit(fitvar)
+    )
+
+
+def compute_extended_abcd_initial_params(
+    fakeselector, datagroups, inputBaseName, label="_smoothing_params"
+):
+    """
+    Compute the per-region polynomial coefficients of the nominal fake histogram
+    smoothing fit, in the layout expected by SmoothExtendedABCD as ``initial_params``.
+
+    This is **not** a generic smoothing utility. It is a translation between two
+    specific implementations of one specific nonprompt estimate, and it hard-codes
+    every one of them:
+
+    * the 6-region 1D extended ABCD of the W mass analysis, i.e. a ``fakeselector``
+      that is a ``FakeSelector1DExtendedABCD`` built with ``smoothing_mode="full"``
+      (it reads the private ``_params_before_reduce``) and ``integrate_x=True``;
+    * exactly 5 free regions plus the predicted one, and the flat index ordering that
+      ``calculate_fullABCD_smoothed(..., signal_region=False)`` returns with the y
+      axis flipped so that tight isolation is last, spelled out below;
+    * a single smoothing axis, and the Chebyshev basis shared by the regressor and
+      the rabbit param model;
+    * ``mc_template = 1``, i.e. the nonprompt process filled with ``OnesSelector``,
+      which is what lets the intercept carry the absolute scale.
+
+    Any other ABCD layout, region count, smoothing mode or basis needs its own
+    translation rather than an argument to this one.
+
+    Both the WRemnants spectrum regressor and SmoothExtendedABCD use the same
+    Chebyshev basis (T_k of the first kind, with x̃ ∈ [-1, 1] via the axis edges),
+    so the regressor coefficients are passed through directly, with a projection of
+    ``log(bin_width)`` added so the exported coefficients predict yields per bin, not
+    rates per unit of the smoothing axis (the regressor fits
+    ``log(data_rate) = log(data_yield / bin_width)``). In the simultaneous
+    (extended)ABCD fit the nonprompt process is filled with ``OnesSelector``, so
+    ``mc_template = 1`` and the polynomial must carry the full absolute scale; the
+    Chebyshev intercept (T_0) is therefore kept.
+
+    The returned 'params' array has shape (5 * n_outer * (order+1),) with the layout
+    [A_params, B_params, C_params, Ax_params, Bx_params].
+
+    Flat ABCD index ordering for the 5 regions with signal_region=False
+    (FakeSelector1DExtendedABCD, with flow=True, after y-axis flip so tight iso is last):
+        0=Ax (low mt, fail iso), 1=Bx (low mt, pass iso),
+        2=A  (mid mt, fail iso), 3=B  (mid mt, pass iso),
+                                 4=C  (signal mt, fail iso)  ← application region, rabbit's free parameter
+    Note: signal_region=False drops flat index 5 = D (signal mt, pass iso = signal
+    region), which is rabbit's predicted region.
+
+    Histselections ↔ SmoothExtendedABCD model name mapping:
+        histsel "application region" (signal mt + fail iso) = C_model (free)
+        histsel "signal region"      (signal mt + pass iso) = D_model (predicted)
+
+    Mapping to model order [A=0, B=1, C=2, Ax=3, Bx=4]:
+        model_A  ← sideband flat 2
+        model_B  ← sideband flat 3
+        model_C  ← sideband flat 4
+        model_Ax ← sideband flat 0
+        model_Bx ← sideband flat 1
+
+    Returns a dict with the keys 'params', 'order', 'smoothing_axis_name', 'n_outer'
+    and 'outer_shape'.
+    """
+    g = datagroups.fakeName
+    # Build the combined fake histogram (data - prompt MC) the same way the normal
+    # histogram loading does, but without applying the histselector.
+    datagroups.loadHistsForDatagroups(
+        inputBaseName, syst="", procsToRead=[g], label=label, applySelection=False
+    )
+    h_fakes = datagroups.groups[g].hists.pop(label)
+
+    # Single call with signal_region=False: returns 5 regions [Ax=0, Bx=1, A=2, B=3, C=4]
+    # The dropped 6th flat element (D = signal mt + pass iso) is the predicted region.
+    fakeselector.calculate_fullABCD_smoothed(h_fakes, signal_region=False)
+    if not hasattr(fakeselector, "_params_before_reduce"):
+        raise RuntimeError(
+            "compute_extended_abcd_initial_params: _params_before_reduce not found on "
+            "the fakeselector. "
+            "Ensure fakeSmoothingMode='full' is used."
+        )
+    # Shape: (*outer_dims, 5, order+1) — indices [Ax=0, Bx=1, A=2, B=3, C=4]
+    params_5d = fakeselector._params_before_reduce.copy()
+
+    reg = fakeselector.spectrum_regressor
+    order = reg.order
+
+    # Flatten outer dims → (n_outer_flat, n_abcd, order+1)
+    outer_shape = params_5d.shape[:-2]
+    n_outer_flat = int(np.prod(outer_shape))
+    params_5d_flat = params_5d.reshape(n_outer_flat, 5, order + 1)
+
+    # Assemble the 5 model regions in model order [A, B, C, Ax, Bx]
+    # A ← flat 2, B ← flat 3, C ← flat 4, Ax ← flat 0, Bx ← flat 1
+    params_model = np.stack(
+        [
+            params_5d_flat[:, 2, :],  # A  (mid mt, fail iso)
+            params_5d_flat[:, 3, :],  # B  (mid mt, pass iso)
+            params_5d_flat[:, 4, :],  # C  (signal mt, fail iso) = application region
+            params_5d_flat[:, 0, :],  # Ax (low mt, fail iso)
+            params_5d_flat[:, 1, :],  # Bx (low mt, pass iso)
+        ],
+        axis=1,
+    )  # (n_outer, 5, order+1)
+
+    # Both bases agree (Chebyshev T_k, x̃ ∈ [-1, 1] via the axis edges).
+    # The regressor fits log(data_rate) = log(data_yield / bin_width); the model
+    # evaluates yield = exp(poly) * mc. With mc = 1 (OnesSelector in the
+    # simultaneous ABCD fit) the target coefficients are those of
+    # log(data_yield) = log_rate + log(bin_width). The log(bin_width)
+    # contribution is projected onto the Chebyshev basis and added.
+    smooth_ax = h_fakes.axes[fakeselector.smoothing_axis_name]
+    bin_widths = np.array(smooth_ax.widths)
+    x_cheby = reg.transform_x(np.array(smooth_ax.centers))
+    n_smooth = len(x_cheby)
+
+    T = np.zeros((n_smooth, order + 1))
+    T[:, 0] = 1.0
+    if order >= 1:
+        T[:, 1] = x_cheby
+    for k in range(2, order + 1):
+        T[:, k] = 2.0 * x_cheby * T[:, k - 1] - T[:, k - 2]
+
+    # Chebyshev coefficients of log(bin_width) on the smoothing grid, shape (order+1,)
+    log_bw_coeffs = np.linalg.lstsq(T, np.log(bin_widths), rcond=None)[0]
+
+    q_model = params_model + log_bw_coeffs[np.newaxis, np.newaxis, :]
+
+    # Flatten to model's layout [A_block, B_block, C_block, Ax_block, Bx_block]
+    # Each block: n_outer × (order+1) in C-order
+    params_out = q_model.transpose(1, 0, 2).reshape(-1)  # (5 * n_outer * (order+1),)
+
+    logger.info(
+        f"Computed smoothing initial params "
+        f"(shape {params_out.shape}, n_outer={n_outer_flat}, n_abcd=5, order={order})"
+    )
+
+    return {
+        "params": params_out,
+        "order": np.array(order),
+        "smoothing_axis_name": [fakeselector.smoothing_axis_name],
+        "n_outer": np.array(n_outer_flat),
+        "outer_shape": np.array(outer_shape, dtype="int64"),
+    }

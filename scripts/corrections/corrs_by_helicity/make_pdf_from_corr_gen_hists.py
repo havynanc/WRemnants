@@ -90,7 +90,7 @@ def main():
     filter_procs = []
     aggregate_groups = []
     if "Z" in args.bosons:
-        filter_procs.append("Zmumu_13TeVGen")
+        filter_procs.extend(["Zmumu_13TeVGen", "Zmumu10to50_13TeVGen"])
         aggregate_groups.append("Zmumu")
     if "W" in args.bosons:
         filter_procs.extend(["Wplusmunu_13TeVGen", "Wminusmunu_13TeVGen"])

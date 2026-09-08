@@ -205,9 +205,14 @@ def common_parser(analysis_label=""):
         help="Add EW theory corrections without modifying the default theoryCorr list. Will be appended to args.theoryCorr",
     )
     parser.add_argument(
+        "--skipByHelicityCorrection",
+        action="store_true",
+        help="Apply the QCD corrections and uncertainties from MiNNLO event weights, otherwise use by-helicity reweighting",
+    )
+    parser.add_argument(
         "--skipHelicity",
         action="store_true",
-        help="Skip the qcdScaleByHelicity histogram (it can be huge)",
+        help="Skip the qcdScaleByHelicity histogram production (it can be huge)",
     )
     parser.add_argument(
         "--noRecoil", action="store_true", help="Don't apply recoil correction"
@@ -516,6 +521,17 @@ def common_parser(analysis_label=""):
             help="Include (very small) statistical uncertainties for pixel multiplicity variation",
         )
         parser.add_argument(
+            "--cvhBadModules",
+            choices=["veto", "sf", "none"],
+            default="sf",
+            help="""Treatment of the CVH refit efficiency holes of the badly aligned modules
+            (see muon_efficiencies_cvh.hpp). 'veto' drops events with a muon crossing
+            one of them, in data and MC alike; 'sf' instead downweights MC by the measured
+            data/MC efficiency ratio, and simulates the dimuon events that leak into the
+            single-muon selection when the second muon's refit fails by letting them
+            through the veto with weight 1 - SF; 'none' does nothing.""",
+        )
+        parser.add_argument(
             "--vetoRecoPt",
             default=15,
             type=float,
@@ -733,6 +749,7 @@ def common_parser(analysis_label=""):
                 "qVGen",
                 "ptVGen",
                 "absYVGen",
+                "massVGen",
                 "helicitySig",
             ],
             help="Generator level variable",

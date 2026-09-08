@@ -16,6 +16,7 @@ from wremnants.production import (
     generator_level_definitions,
     muon_calibration,
     muon_efficiencies_binned,
+    muon_efficiencies_cvh,
     muon_efficiencies_smooth,
     muon_prefiring,
     muon_selections,
@@ -236,17 +237,14 @@ if args.addAxisSignUt:
     )
 
 # for isoMt region validation and related tests
-# use very high upper edge as a proxy for infinity (cannot exploit overflow bins in the fit)
-# can probably use numpy infinity, but this is compatible with the root conversion
-# FIXME: now we can probably use overflow bins in the fit
 axis_mtCat = hist.axis.Variable(
-    [0, int(args.mtCut / 2.0), args.mtCut, 1000],
+    [0, int(args.mtCut / 2.0), args.mtCut, np.inf],
     name="mt",
     underflow=False,
     overflow=False,
 )
 axis_isoCat = hist.axis.Variable(
-    [0, 0.15, 0.3, 100], name="relIso", underflow=False, overflow=False
+    [0, 0.15, 0.3, np.inf], name="relIso", underflow=False, overflow=False
 )
 
 if args.addIsoMtAxes:
@@ -310,7 +308,7 @@ muon_prefiring_helper, muon_prefiring_helper_stat, muon_prefiring_helper_syst = 
     muon_prefiring.make_muon_prefiring_helpers(era=era)
 )
 
-theory_helpers_procs = theory_corrections.make_theory_helpers(
+helicity_smoothing_helpers_procs = theory_corrections.make_helicity_smoothing_helpers(
     args.pdfs, args.theoryCorr, corrs=["qcdScale", "alphaS", "pdf"]
 )
 
@@ -490,9 +488,9 @@ def build_graph(df, dataset):
     isZ = dataset.name in samples.zprocs
     isWorZ = isW or isZ
 
-    theory_helpers = None
+    helicity_smoothing_helpers = None
     if isWorZ:
-        theory_helpers = theory_helpers_procs[dataset.name[0]]
+        helicity_smoothing_helpers = helicity_smoothing_helpers_procs[dataset.name[0]]
 
     if dataset.is_data:
         df = df.DefinePerSample("weight", "1.0")
@@ -616,7 +614,7 @@ def build_graph(df, dataset):
                     args,
                     dataset.name,
                     corr_helpers,
-                    theory_helpers,
+                    helicity_smoothing_helpers,
                     [a for a in unfolding_axes[level] if a.name != "acceptance"],
                     [c for c in unfolding_cols[level] if c != f"{level}_acceptance"],
                     base_name=level,
@@ -643,6 +641,14 @@ def build_graph(df, dataset):
     df = muon_calibration.define_corrected_muons(
         df, cvh_helper, jpsi_helper, args, dataset, smearing_helper, bias_helper
     )
+
+    if args.cvhBadModules == "veto":
+        # CVH refit efficiency holes (badly aligned modules, incl. TIB-L2 detId
+        # 369141860): remove the affected (eta,phi') rectangles from data and MC
+        # alike, so the data-only refit inefficiency needs no correction.
+        df = muon_efficiencies_cvh.apply_bad_module_veto(
+            df, ptCut=args.vetoRecoPt, etaCut=args.vetoRecoEta
+        )
 
     df = muon_selections.select_veto_muons(
         df,
@@ -900,6 +906,30 @@ def build_graph(df, dataset):
                 )
                 weight_expr += "*weight_fullMuonSF_withTrackingReco"
 
+            if args.cvhBadModules == "sf":
+                # alternative to the geometric veto applied above: downweight MC
+                # in the affected (eta,phi') cells by the measured data/MC
+                # efficiency ratio. See muon_efficiencies_cvh.hpp; charge/pt undo
+                # the track bending.
+                df, _ = muon_efficiencies_cvh.define_cvh_weight(
+                    df,
+                    [
+                        (
+                            "nonTrigMuons_eta0",
+                            "nonTrigMuons_phi0",
+                            "nonTrigMuons_charge0",
+                            "nonTrigMuons_pt0",
+                        ),
+                        (
+                            "trigMuons_eta0",
+                            "trigMuons_phi0",
+                            "trigMuons_charge0",
+                            "trigMuons_pt0",
+                        ),
+                    ],
+                )
+                weight_expr += "*weight_cvhSF"
+
         # prepare inputs for pixel multiplicity helpers
         cvhName = "cvhideal"
 
@@ -952,7 +982,11 @@ def build_graph(df, dataset):
         logger.debug(f"Exp weight defined: {weight_expr}")
         df = df.Define("exp_weight", weight_expr)
         df = theory_corrections.define_theory_weights_and_corrs(
-            df, dataset.name, corr_helpers, args, theory_helpers=theory_helpers
+            df,
+            dataset.name,
+            corr_helpers,
+            args,
+            helicity_smoothing_helpers=helicity_smoothing_helpers,
         )
 
     results.append(
@@ -1480,7 +1514,7 @@ def build_graph(df, dataset):
                 args,
                 dataset.name,
                 corr_helpers,
-                theory_helpers,
+                helicity_smoothing_helpers,
                 axes,
                 cols,
                 for_wmass=False,

@@ -12,11 +12,14 @@ from wremnants.utilities import common, parsing
 from wums import logging
 
 analysis_label = common.analysis_label(os.path.basename(__file__))
+DEFAULT_DATA_LAYER_CORRECTION_FILE = os.path.join(
+    common.data_dir, "calibration", "correctionResults_v721_recjpsidata.root"
+)
 parser, initargs = parsing.common_parser(analysis_label)
 parser.add_argument(
     "--dataFile",
-    default="/scratch/submit/cms/emanca/DstMiniAODTransientEmulationCVHShared_v1",
-    help="Input ROOT file for data",
+    default="/scratch/submit/cms/emanca/D0Data_LayerJacobian_v5",
+    help="Input ROOT file, glob, or directory for data",
 )
 parser.add_argument(
     "--mcFile",
@@ -26,6 +29,22 @@ parser.add_argument(
         "/scratch/submit/cms/emanca/DStarTransientCVHTruth_prod500M_v1",
     ],
     help="One or more input ROOT files, globs, or directories for MC",
+)
+parser.add_argument(
+    "--dataLayerCorrectionFile",
+    default=DEFAULT_DATA_LAYER_CORRECTION_FILE,
+    help=(
+        "CVH layer-correction ROOT file for data. The native schema-1 Jacobians "
+        "are applied after nominal candidate selection."
+    ),
+)
+parser.add_argument(
+    "--mcLayerCorrectionFile",
+    default=None,
+    help=(
+        "Optional CVH layer-correction ROOT file for MC. When set, the native "
+        "schema-1 Jacobians are applied after nominal candidate selection."
+    ),
 )
 parser.add_argument(
     "--treeName",
@@ -280,6 +299,65 @@ logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 M_K = 0.493677
 M_PI = 0.139570
 
+LAYER_CORRECTION_SCHEMA_VERSION = 1
+LAYER_CORRECTION_BRANCHES = (
+    "CVH_nParms",
+    "CVH_globalidxv",
+    "CVH_K_jacRef",
+    "CVH_pi_jacRef",
+    "CVH_D0_jacMass",
+    "CVH_D0_jacobianValid",
+    "CVH_D0_jacobianSchemaVersion",
+)
+
+
+def make_layer_correction_helper(filename, option_name):
+    """Load one CVH corrector and return it with its index-map size."""
+    if filename is None:
+        return None, None
+    if "://" not in filename and not os.path.isfile(filename):
+        raise ValueError(f"{option_name} does not exist: {filename}")
+
+    correction_file = ROOT.TFile.Open(filename, "READ")
+    if not correction_file or correction_file.IsZombie():
+        raise ValueError(f"{option_name} is not a readable ROOT file: {filename}")
+    try:
+        index_tree = correction_file.Get("idxmaptree")
+        parameter_tree = correction_file.Get("parmtree")
+        if not index_tree or not parameter_tree:
+            missing = []
+            if not index_tree:
+                missing.append("idxmaptree")
+            if not parameter_tree:
+                missing.append("parmtree")
+            raise ValueError(
+                f"{option_name} is missing correction tree(s) "
+                f"{', '.join(missing)}: {filename}"
+            )
+        index_count = int(index_tree.GetEntries())
+        if index_count <= 0 or int(parameter_tree.GetEntries()) <= 0:
+            raise ValueError(
+                f"{option_name} contains no correction parameters: {filename}"
+            )
+    finally:
+        correction_file.Close()
+
+    try:
+        helper = muon_calibration.make_muon_calibration_helper_single(filename)
+    except Exception as exc:
+        raise ValueError(f"Unable to load {option_name}: {filename}") from exc
+    return helper, index_count
+
+
+data_layer_correction_helper, data_layer_correction_index_count = (
+    make_layer_correction_helper(
+        args.dataLayerCorrectionFile, "--dataLayerCorrectionFile"
+    )
+)
+mc_layer_correction_helper, mc_layer_correction_index_count = (
+    make_layer_correction_helper(args.mcLayerCorrectionFile, "--mcLayerCorrectionFile")
+)
+
 calib_filepaths = common.calib_filepaths
 scale_diff_weights_helper = (
     ROOT.wrem.SplinesDifferentialWeightsHelper(calib_filepaths["tflite_file"])
@@ -356,6 +434,7 @@ _smearing_helper, smearing_uncertainty_helper = (
 ROOT.gInterpreter.Declare("""
     #include <cmath>
     #include <algorithm>
+    #include <limits>
     #include "ROOT/RVec.hxx"
 
     namespace wrem {
@@ -430,6 +509,44 @@ ROOT.gInterpreter.Declare("""
             static_cast<float>(gen_charge[best]),
             1.f
         };
+    }
+
+    template <typename N, typename IndexVec, typename KJacVec,
+              typename PiJacVec, typename D0JacVec, typename Schema>
+    bool valid_layer_correction_payload(
+        const N &nparms,
+        const IndexVec &globalidxv,
+        const KJacVec &k_jac,
+        const PiJacVec &pi_jac,
+        const D0JacVec &d0_jac_mass,
+        bool jacobian_valid,
+        const Schema &schema_version,
+        std::size_t correction_index_count) {
+        if (!jacobian_valid || static_cast<unsigned int>(schema_version) != 1 ||
+            nparms <= 0) {
+            return false;
+        }
+        const auto n = static_cast<std::size_t>(nparms);
+        if (n > std::numeric_limits<std::size_t>::max() / 3 ||
+            globalidxv.size() != n || k_jac.size() != 3 * n ||
+            pi_jac.size() != 3 * n || d0_jac_mass.size() != n) {
+            return false;
+        }
+        for (const auto idx : globalidxv) {
+            if (static_cast<std::size_t>(idx) >= correction_index_count) {
+                return false;
+            }
+        }
+        for (const auto value : k_jac) {
+            if (!std::isfinite(static_cast<double>(value))) return false;
+        }
+        for (const auto value : pi_jac) {
+            if (!std::isfinite(static_cast<double>(value))) return false;
+        }
+        for (const auto value : d0_jac_mass) {
+            if (!std::isfinite(static_cast<double>(value))) return false;
+        }
+        return true;
     }
 
     }
@@ -642,6 +759,7 @@ d0_axes = list(template_axes)
 
 # Coordinate columns matching d0_axes, in the same order. In 5D mode the pion
 # analogues (pi_CVH_eta0, mRpi) are inserted before the D0 mass (shape) axis.
+# this looks to be broken after the merge with the new selection - come back to fix 5d mode later
 if args.pionTemplateAxes:
     coord_cols = ["K_CVH_eta0", "mRK", "pi_CVH_eta0", "mRpi", "D0_mass"]
 else:
@@ -653,7 +771,7 @@ else:
 # [0, 0.20] covers the bulk with headroom). The mR ratio gets its own axis (like qopr).
 axis_diag_pt = hist.axis.Regular(100, 0.0, 20.0, name="pt")
 axis_diag_eta = hist.axis.Regular(96, -2.4, 2.4, name="eta")
-axis_diag_mR = hist.axis.Regular(100, 0.0, 1.80, name="mR")
+axis_diag_mRK = hist.axis.Regular(100, 0.0, 1.80, name="mR")
 axis_diag_mRpi = hist.axis.Regular(100, 0.0, 0.20, name="mRpi")
 axis_diag_qopr = hist.axis.Regular(200, 0.5, 1.5, name="qopr")
 axis_diag_mR_ratio = hist.axis.Regular(200, 0.0, 2.0, name="mRr")
@@ -718,6 +836,163 @@ def require_columns(columns, names):
     missing = [name for name in names if name not in columns]
     if missing:
         raise ValueError(f"Missing required D0 ntuple branches: {', '.join(missing)}")
+
+
+def require_layer_correction_schema(df, dataset):
+    missing = [
+        name for name in LAYER_CORRECTION_BRANCHES if name not in available_columns(df)
+    ]
+    if missing:
+        raise ValueError(
+            f"{dataset.name}: layer correction requested but native schema-1 "
+            f"branches are missing: {', '.join(missing)}"
+        )
+
+
+def add_layer_correction_diagnostics(df, results, dataset):
+    dataset_label = "data" if dataset.is_data else "mc"
+    diagnostic_specs = [
+        ("D0", "D0_mass", "D0_mass_layer", axis_D0mass),
+        ("mRK", "mRK", "mRK_layer", axis_diag_mRK),
+        ("etaK", "K_CVH_eta0", "K_layer_eta", axis_diag_eta),
+        ("K_pt", "K_CVH_pt0", "K_layer_pt", axis_diag_pt),
+        ("pi_pt", "pi_CVH_pt0", "pi_layer_pt", axis_diag_pt),
+    ]
+    for observable, nominal, corrected, axis in diagnostic_specs:
+        results.append(
+            df.HistoBoost(
+                f"h{observable}_{dataset_label}_layer_nominal",
+                [axis],
+                [nominal, "weight"],
+                storage=hist.storage.Double(),
+            )
+        )
+        results.append(
+            df.HistoBoost(
+                f"h{observable}_{dataset_label}_layer_corrected",
+                [axis],
+                [corrected, "weight"],
+                storage=hist.storage.Double(),
+            )
+        )
+
+
+def apply_layer_corrections(df, dataset, helper, correction_index_count, results):
+    nominal_columns = {
+        "pt_K": "K_CVH_pt0",
+        "eta_K": "K_CVH_eta0",
+        "phi_K": "K_CVH_phi0",
+        "pt_pi": "pi_CVH_pt0",
+        "eta_pi": "pi_CVH_eta0",
+        "phi_pi": "pi_CVH_phi0",
+        "eta_template": "K_CVH_eta0",
+        "mRK": "mRK",
+        "mass": "D0_mass",
+    }
+    if helper is None:
+        return df, nominal_columns
+
+    require_layer_correction_schema(df, dataset)
+    df = (
+        df.Define(
+            "d0_layer_globalidxvint",
+            "ROOT::VecOps::RVec<int>(CVH_globalidxv)",
+        )
+        .Define(
+            "d0_layer_payload_valid",
+            "wrem::d0::valid_layer_correction_payload("
+            "CVH_nParms, CVH_globalidxv, CVH_K_jacRef, CVH_pi_jacRef, "
+            "CVH_D0_jacMass, CVH_D0_jacobianValid, "
+            f"CVH_D0_jacobianSchemaVersion, {correction_index_count})",
+        )
+        .Filter("d0_layer_payload_valid", "valid D0 layer-correction payload")
+        .Filter(
+            "std::abs(K_charge0) == 1 && std::abs(pi_charge0) == 1 && "
+            "K_CVH_pt0 > 0.0 && pi_CVH_pt0 > 0.0 && "
+            "std::isfinite(K_CVH_pt0) && std::isfinite(K_CVH_eta0) && "
+            "std::isfinite(K_CVH_phi0) && std::isfinite(pi_CVH_pt0) && "
+            "std::isfinite(pi_CVH_eta0) && std::isfinite(pi_CVH_phi0)",
+            "finite unit-charge D0 layer-correction inputs",
+        )
+        .Define("d0_layer_K_pt_input", "static_cast<float>(K_CVH_pt0)")
+        .Define("d0_layer_K_eta_input", "static_cast<float>(K_CVH_eta0)")
+        .Define("d0_layer_K_phi_input", "static_cast<float>(K_CVH_phi0)")
+        .Define("d0_layer_pi_pt_input", "static_cast<float>(pi_CVH_pt0)")
+        .Define("d0_layer_pi_eta_input", "static_cast<float>(pi_CVH_eta0)")
+        .Define("d0_layer_pi_phi_input", "static_cast<float>(pi_CVH_phi0)")
+        .Define("d0_layer_K_charge", "static_cast<int>(K_charge0)")
+        .Define("d0_layer_pi_charge", "static_cast<int>(pi_charge0)")
+        .Define(
+            "K_layer_Mom4Charge",
+            helper,
+            [
+                "d0_layer_K_pt_input",
+                "d0_layer_K_eta_input",
+                "d0_layer_K_phi_input",
+                "d0_layer_K_charge",
+                "d0_layer_globalidxvint",
+                "CVH_K_jacRef",
+            ],
+        )
+        .Define(
+            "pi_layer_Mom4Charge",
+            helper,
+            [
+                "d0_layer_pi_pt_input",
+                "d0_layer_pi_eta_input",
+                "d0_layer_pi_phi_input",
+                "d0_layer_pi_charge",
+                "d0_layer_globalidxvint",
+                "CVH_pi_jacRef",
+            ],
+        )
+        .Define("K_layer_pt", "K_layer_Mom4Charge.first.Pt()")
+        .Define("K_layer_eta", "K_layer_Mom4Charge.first.Eta()")
+        .Define("K_layer_phi", "K_layer_Mom4Charge.first.Phi()")
+        .Define("pi_layer_pt", "pi_layer_Mom4Charge.first.Pt()")
+        .Define("pi_layer_eta", "pi_layer_Mom4Charge.first.Eta()")
+        .Define("pi_layer_phi", "pi_layer_Mom4Charge.first.Phi()")
+        .Define(
+            "d0_layer_kinematics_valid",
+            "std::abs(K_layer_Mom4Charge.second) == 1 && "
+            "std::abs(pi_layer_Mom4Charge.second) == 1 && "
+            "K_layer_pt > 0.0 && pi_layer_pt > 0.0 && "
+            "std::isfinite(K_layer_pt) && std::isfinite(K_layer_eta) && "
+            "std::isfinite(K_layer_phi) && std::isfinite(pi_layer_pt) && "
+            "std::isfinite(pi_layer_eta) && std::isfinite(pi_layer_phi)",
+        )
+        .Filter("d0_layer_kinematics_valid", "finite corrected D0 daughter kinematics")
+        .Define(
+            "K_layer_p4",
+            f"ROOT::Math::PtEtaPhiMVector(K_layer_pt, K_layer_eta, K_layer_phi, {M_K})",
+        )
+        .Define(
+            "pi_layer_p4",
+            f"ROOT::Math::PtEtaPhiMVector(pi_layer_pt, pi_layer_eta, pi_layer_phi, {M_PI})",
+        )
+        .Define("D0_mass_layer", "(K_layer_p4 + pi_layer_p4).M()")
+        .Define(
+            "mRK_layer",
+            f"{M_K}*{M_K}*(pi_layer_p4.E()/K_layer_p4.E())/D0_mass_layer",
+        )
+        .Filter(
+            "std::isfinite(D0_mass_layer) && D0_mass_layer > 0.0 && "
+            "std::isfinite(mRK_layer)",
+            "finite corrected D0 observables",
+        )
+    )
+    add_layer_correction_diagnostics(df, results, dataset)
+    return df, {
+        "pt_K": "K_layer_pt",
+        "eta_K": "K_layer_eta",
+        "phi_K": "K_layer_phi",
+        "pt_pi": "pi_layer_pt",
+        "eta_pi": "pi_layer_eta",
+        "phi_pi": "pi_layer_phi",
+        "eta_template": "K_layer_eta",
+        "mRK": "mRK_layer",
+        "mass": "D0_mass_layer",
+    }
 
 
 def available_first(columns, names, label):
@@ -909,9 +1184,8 @@ def data_selection():
         "chi2_piK0 > 0.0",
         "chi2_D0pis0 > 0.0",
         "std::fabs(D0_fit_mass_for_selection - 1.86483) < 0.035",
-        "pis_dR_D00 < 0.12",
+        "pis_dR_D00 < 0.16",
         "Dst_pt0 > 5.0",
-        "Dst_iso0 > 0.20",
     ]
     if args.pvalCut is not None:
         # Guard against the unfilled -99 sentinel: reject a candidate only when its
@@ -957,12 +1231,29 @@ def build_graph(df, dataset):
     else:
         df = df.Filter(bool_filter(truth_matched_mc_selection()))
 
+    layer_helper = (
+        data_layer_correction_helper if dataset.is_data else mc_layer_correction_helper
+    )
+    layer_index_count = (
+        data_layer_correction_index_count
+        if dataset.is_data
+        else mc_layer_correction_index_count
+    )
+    df, template_columns = apply_layer_corrections(
+        df, dataset, layer_helper, layer_index_count, results
+    )
+
     if dataset.is_data:
         results.append(
             df.HistoBoost(
                 "hD0_data",
                 d0_axes,
-                coord_cols + ["weight"],
+                [
+                    template_columns["eta_template"],
+                    template_columns["mRK"],
+                    template_columns["mass"],
+                    "weight",
+                ],
             )
         )
     else:
@@ -981,8 +1272,8 @@ def build_graph(df, dataset):
             sat = args.genPtReweightSaturation
             factor_K = f"std::max<float>(1.0f, {sat}f / K_gen_match[0])"
             factor_pi = f"std::max<float>(1.0f, {sat}f / pi_gen_match[0])"
-            reco_pt_K = f"float(K_CVH_pt0) * {factor_K}"
-            reco_pt_pi = f"float(pi_CVH_pt0) * {factor_pi}"
+            reco_pt_K = f"float({template_columns['pt_K']}) * {factor_K}"
+            reco_pt_pi = f"float({template_columns['pt_pi']}) * {factor_pi}"
             gen_pt_K = f"std::max<float>(K_gen_match[0], {sat}f)"
             gen_pt_pi = f"std::max<float>(pi_gen_match[0], {sat}f)"
             logger.info(
@@ -990,19 +1281,23 @@ def build_graph(df, dataset):
                 f"same factor to preserve qopr (scale_recoPt, scale_genPt)"
             )
         else:
-            reco_pt_K = "float(K_CVH_pt0)"
-            reco_pt_pi = "float(pi_CVH_pt0)"
+            reco_pt_K = f"float({template_columns['pt_K']})"
+            reco_pt_pi = f"float({template_columns['pt_pi']})"
             gen_pt_K = "K_gen_match[0]"
             gen_pt_pi = "pi_gen_match[0]"
         df = (
             df.Define("nominal_weight", "weight")
             .Define(
                 "scale_recoEta",
-                "ROOT::VecOps::RVec<float>{float(K_CVH_eta0), float(pi_CVH_eta0)}",
+                "ROOT::VecOps::RVec<float>{"
+                f"float({template_columns['eta_K']}), "
+                f"float({template_columns['eta_pi']})}}",
             )
             .Define(
                 "scale_recoPhi",
-                "ROOT::VecOps::RVec<float>{float(K_CVH_phi0), float(pi_CVH_phi0)}",
+                "ROOT::VecOps::RVec<float>{"
+                f"float({template_columns['phi_K']}), "
+                f"float({template_columns['phi_pi']})}}",
             )
             .Define(
                 "scale_recoCharge",
@@ -1098,7 +1393,12 @@ def build_graph(df, dataset):
             df.HistoBoost(
                 "hD0_nom",
                 d0_axes,
-                coord_cols + ["weight"],
+                [
+                    template_columns["eta_template"],
+                    template_columns["mRK"],
+                    template_columns["mass"],
+                    "weight",
+                ],
             )
         )
 
@@ -1108,12 +1408,18 @@ def build_graph(df, dataset):
             df = (
                 df.Define("K_gen_pt", "K_gen_match[0]")
                 .Define("pi_gen_pt", "pi_gen_match[0]")
-                .Define("K_reco_p", "K_CVH_pt0 * std::cosh(K_CVH_eta0)")
+                .Define(
+                    "K_reco_p",
+                    f"{template_columns['pt_K']} * std::cosh({template_columns['eta_K']})",
+                )
                 .Define("K_gen_p", "K_gen_match[0] * std::cosh(K_gen_match[1])")
                 .Define("K_qop_reco", "K_charge0 / K_reco_p")
                 .Define("K_qop_gen", "K_gen_match[3] / K_gen_p")
                 .Define("K_qopr", "K_qop_reco / K_qop_gen")
-                .Define("pi_reco_p", "pi_CVH_pt0 * std::cosh(pi_CVH_eta0)")
+                .Define(
+                    "pi_reco_p",
+                    f"{template_columns['pt_pi']} * std::cosh({template_columns['eta_pi']})",
+                )
                 .Define("pi_gen_p", "pi_gen_match[0] * std::cosh(pi_gen_match[1])")
                 .Define("pi_qop_reco", "pi_charge0 / pi_reco_p")
                 .Define("pi_qop_gen", "pi_gen_match[3] / pi_gen_p")
@@ -1131,9 +1437,10 @@ def build_graph(df, dataset):
                     f"pi_gen_match[0], pi_gen_match[1], pi_gen_match[2], {M_PI})).M()",
                 )
                 .Define("mRK_gen", f"{M_K}*{M_K}*(pi_E_gen/K_E_gen)/D0_mass_gen")
-                .Define("mRK_ratio", "mRK / mRK_gen")
+                .Define("mRK_ratio", f"{template_columns['mRK']} / mRK_gen")
                 # gen/reco etaK, etaPi and the pion analogues of the mRK diagnostics
                 # (mRpi = literal K<->pi swap). reco mRpi is the existing "mRpi" column.
+                # note - may want to modify the following 4 lines to match the mRK_ratio definition with the template_columns construct (it was a merge conflict)
                 .Define("K_gen_eta", "K_gen_match[1]")
                 .Define("pi_gen_eta", "pi_gen_match[1]")
                 .Define("mRpi_gen", f"{M_PI}*{M_PI}*(K_E_gen/pi_E_gen)/D0_mass_gen")
@@ -1141,13 +1448,13 @@ def build_graph(df, dataset):
             )
             for name, col, axis in [
                 ("hK_gen_pt", "K_gen_pt", axis_diag_pt),
-                ("hK_reco_pt", "K_CVH_pt0", axis_diag_pt),
+                ("hK_reco_pt", template_columns["pt_K"], axis_diag_pt),
                 ("hpi_gen_pt", "pi_gen_pt", axis_diag_pt),
-                ("hpi_reco_pt", "pi_CVH_pt0", axis_diag_pt),
+                ("hpi_reco_pt", template_columns["pt_pi"], axis_diag_pt),
                 ("hK_qopr", "K_qopr", axis_diag_qopr),
                 ("hpi_qopr", "pi_qopr", axis_diag_qopr),
-                ("hmRK_gen", "mRK_gen", axis_diag_mR),
-                ("hmRK_reco", "mRK", axis_diag_mR),
+                ("hmRK_gen", "mRK_gen", axis_diag_mRK),
+                ("hmRK_reco", template_columns["mRK"], axis_diag_mRK),
                 ("hmRK_ratio", "mRK_ratio", axis_diag_mR_ratio),
                 ("hK_gen_eta", "K_gen_eta", axis_diag_eta),
                 ("hK_reco_eta", "K_CVH_eta0", axis_diag_eta),
@@ -1195,7 +1502,12 @@ def build_graph(df, dataset):
             df.HistoBoost(
                 "nominal_muonScaleSyst_responseWeights",
                 d0_axes,
-                coord_cols + ["nominal_muonScaleSyst_responseWeights_tensor"],
+                [
+                    template_columns["eta_template"],
+                    template_columns["mRK"],
+                    template_columns["mass"],
+                    "nominal_muonScaleSyst_responseWeights_tensor",
+                ],
                 tensor_axes=data_jpsi_crctn_unc_helper.tensor_axes,
                 storage=hist.storage.Double(),
             )
@@ -1206,17 +1518,17 @@ def build_graph(df, dataset):
                 "d0_scale_var",
                 d0_scale_var_helper,
                 [
-                    "K_CVH_pt0",
-                    "K_CVH_eta0",
-                    "K_CVH_phi0",
+                    template_columns["pt_K"],
+                    template_columns["eta_K"],
+                    template_columns["phi_K"],
                     "K_charge0",
-                    "pi_CVH_pt0",
-                    "pi_CVH_eta0",
-                    "pi_CVH_phi0",
+                    template_columns["pt_pi"],
+                    template_columns["eta_pi"],
+                    template_columns["phi_pi"],
                     "pi_charge0",
-                    "D0_mass",
-                    "mRK",
-                    "mRpi",
+                    template_columns["mass"],
+                    template_columns["mRK"],
+                    #"mRpi", #add pion back in in the future maybe
                 ],
             )
             df = df.Define("d0_scale_var_mass", "d0_scale_var.mass")
@@ -1250,8 +1562,10 @@ def build_graph(df, dataset):
                 df.HistoBoost(
                     "nominal_muonScaleSyst_manual",
                     d0_axes + manual_scale_axes,
-                    manual_coord_cols
-                    + [
+                    [
+                        template_columns["eta_template"],
+                        "d0_scale_var_mRK",
+                        "d0_scale_var_mass",
                         "d0_scale_var_idx",
                         "d0_scale_updown",
                         "nominal_weight",
@@ -1264,7 +1578,11 @@ def build_graph(df, dataset):
             df,
             d0_axes,
             results,
-            coord_cols,
+            [
+                template_columns["eta_template"],
+                template_columns["mRK"],
+                template_columns["mass"],
+            ],
             smearing_uncertainty_helper,
             "scale",
             storage_type=hist.storage.Double(),
