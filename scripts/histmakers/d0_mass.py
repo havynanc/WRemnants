@@ -1545,7 +1545,7 @@ def build_graph(df, dataset):
                     "pi_charge0",
                     template_columns["mass"],
                     template_columns["mRK"],
-                    #"mRpi", #add pion back in in the future maybe
+                    "mRpi", #work pion into template_columns framework in the future
                 ],
             )
             df = df.Define("d0_scale_var_mass", "d0_scale_var.mass")
