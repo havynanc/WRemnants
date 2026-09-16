@@ -4,10 +4,15 @@ The selections in this module define mutually exclusive event categories that
 mirror the kinematic and geometric requirements of the low- and high-pT
 Upsilon triggers. They are deliberately independent of histogram booking and
 weight construction so the same definitions can be reused in both steps.
+
+Which category an event lands in is decided by offline geometry alone; the HLT
+path is then a requirement attached to the branch the geometry picked. The two
+paths overlap heavily, so a split on path membership would not partition the
+sample, and the trigger emulation in simulation is not reliable enough to drive
+the assignment.
 """
 
 import hist
-import numpy as np
 
 SELECTIONS = (
     "inclusive_or",
@@ -46,129 +51,79 @@ def category_expression(selection):
     """
 
     _validate_selection(selection)
-    trigger_or = "(upsilon_trigger_dimuon8 || upsilon_trigger_dimuon13)"
+    trigger_or = "(vrw_trigger_dimuon8 || vrw_trigger_dimuon13)"
     if selection == "inclusive_or":
-        return f"({trigger_or} && upsilon_ptll > {DIMUON_PT_MIN}) ? 0 : -1"
+        return f"({trigger_or} && vrw_ptll > {DIMUON_PT_MIN}) ? 0 : -1"
 
     route = {
-        "muon_eta": "upsilon_barrel_muon_eta",
-        "dimuon_rapidity": "upsilon_barrel_dimuon_rapidity",
-        "combined_geometry": "upsilon_barrel_geometry",
+        "muon_eta": "vrw_barrel_muon_eta",
+        "dimuon_rapidity": "vrw_barrel_dimuon_rapidity",
+        "combined_geometry": "vrw_barrel_geometry",
     }[selection]
     barrel = (
-        f"({route} && upsilon_trigger_dimuon8 && upsilon_barrel_geometry "
-        f"&& upsilon_ptll > {DIMUON_PT_MIN})"
+        f"({route} && vrw_trigger_dimuon8 && vrw_barrel_geometry "
+        f"&& vrw_ptll > {DIMUON_PT_MIN})"
     )
     high = (
-        f"(!{route} && upsilon_trigger_dimuon13 "
-        f"&& upsilon_ptll > {HIGH_DIMUON_PT_MIN} "
-        f"&& upsilon_ptlead > {HIGH_LEADING_PT_MIN} "
-        f"&& upsilon_ptsublead > {HIGH_SUBLEADING_PT_MIN})"
+        f"(!{route} && vrw_trigger_dimuon13 "
+        f"&& vrw_ptll > {HIGH_DIMUON_PT_MIN} "
+        f"&& vrw_ptlead > {HIGH_LEADING_PT_MIN} "
+        f"&& vrw_ptsublead > {HIGH_SUBLEADING_PT_MIN})"
     )
     return f"{barrel} ? 0 : ({high} ? 1 : -1)"
 
 
-def define_columns(df, columns, selection):
-    """Define the reconstructed kinematics and selected category on *df*."""
+def define_trigger_columns(df, columns, selection):
+    """Define the trigger and geometry columns used by *selection*.
+
+    The dimuon kinematics are defined separately by the reweighting core; only
+    the HLT decisions and the barrel geometry are resonance specific.
+    """
 
     _validate_selection(selection)
-    muon_mass = 0.1056583755
     return (
         df.Define(
-            "upsilon_muplus_mom4",
-            "ROOT::Math::PtEtaPhiMVector("
-            f"{columns['plus_pt']}, {columns['plus_eta']}, "
-            f"{columns['plus_phi']}, {muon_mass})",
-        )
-        .Define(
-            "upsilon_muminus_mom4",
-            "ROOT::Math::PtEtaPhiMVector("
-            f"{columns['minus_pt']}, {columns['minus_eta']}, "
-            f"{columns['minus_phi']}, {muon_mass})",
-        )
-        .Define("upsilon_dimuon_mom4", "upsilon_muplus_mom4 + upsilon_muminus_mom4")
-        .Define(
-            "upsilon_ptlead",
-            f"std::max(double({columns['plus_pt']}), "
-            f"double({columns['minus_pt']}))",
-        )
-        .Define(
-            "upsilon_ptsublead",
-            f"std::min(double({columns['plus_pt']}), "
-            f"double({columns['minus_pt']}))",
-        )
-        .Define("upsilon_ptll", "upsilon_dimuon_mom4.pt()")
-        .Define("upsilon_yll", "upsilon_dimuon_mom4.Rapidity()")
-        .Define(
-            "upsilon_cs",
-            "wrem::csSineCosThetaPhi(upsilon_muplus_mom4, upsilon_muminus_mom4)",
-        )
-        .Define("upsilon_costheta", "upsilon_cs.costheta")
-        .Define(
-            "upsilon_trigger_dimuon8",
+            "vrw_trigger_dimuon8",
             "bool(HLT_Dimuon8_Upsilon_Barrel != 0)",
         )
-        .Define("upsilon_trigger_dimuon13", "bool(HLT_Dimuon13_Upsilon != 0)")
+        .Define("vrw_trigger_dimuon13", "bool(HLT_Dimuon13_Upsilon != 0)")
         .Define(
-            "upsilon_barrel_muon_eta",
+            "vrw_barrel_muon_eta",
             f"bool(std::fabs({columns['plus_eta']}) < {BARREL_MUON_ETA_MAX} && "
             f"std::fabs({columns['minus_eta']}) < {BARREL_MUON_ETA_MAX})",
         )
         .Define(
-            "upsilon_barrel_dimuon_rapidity",
-            f"bool(std::fabs(upsilon_yll) < {BARREL_DIMUON_RAPIDITY_MAX})",
+            "vrw_barrel_dimuon_rapidity",
+            f"bool(std::fabs(vrw_yll) < {BARREL_DIMUON_RAPIDITY_MAX})",
         )
         .Define(
-            "upsilon_barrel_delta_eta",
+            "vrw_barrel_delta_eta",
             f"bool(std::fabs(double({columns['plus_eta']}) - "
             f"double({columns['minus_eta']})) < {BARREL_DELTA_ETA_MAX})",
         )
         .Define(
-            "upsilon_barrel_geometry",
-            "bool(upsilon_barrel_muon_eta && "
-            "upsilon_barrel_dimuon_rapidity && upsilon_barrel_delta_eta)",
+            "vrw_barrel_geometry",
+            "bool(vrw_barrel_muon_eta && "
+            "vrw_barrel_dimuon_rapidity && vrw_barrel_delta_eta)",
         )
-        .Define("upsilon_trigger_category", category_expression(selection))
     )
 
 
-def book_v_reweight_input(df, selection, weight_column="weight"):
-    """Book fine-binned inputs from which category-specific maps are derived."""
+def cfg_overrides(selection):
+    """Return resonance-option overrides required by *selection*.
 
-    labels = category_labels(selection)
-    axes = [
-        hist.axis.Integer(
-            0,
-            len(labels),
-            name="triggerCategory",
-            underflow=False,
-            overflow=False,
-            metadata={"selection": selection, "labels": labels},
-        ),
-        hist.axis.Variable(
-            np.round(np.arange(DIMUON_PT_MIN, 100.0001, 0.5), 8),
-            name="ptll",
-        ),
-        hist.axis.Variable(
-            np.round(np.arange(-MUON_ETA_MAX, MUON_ETA_MAX + 0.0001, 0.05), 8),
-            name="yll",
-        ),
-        hist.axis.Variable(
-            np.round(np.arange(-1.0, 1.0001, 0.05), 8),
-            name="cosThetaStarll",
-        ),
-    ]
-    return df.HistoBoost(
-        "upsilonTriggerVReweightInput",
-        axes,
-        [
-            "upsilon_trigger_category",
-            "upsilon_ptll",
-            "upsilon_yll",
-            "upsilon_costheta",
-            weight_column,
-        ],
-    )
+    The trigger categories reach beyond the default Y(1S) barrel configuration,
+    so the eta acceptance and mass window are widened to cover the full
+    Y(1S)/Y(2S)/Y(3S) system.
+    """
+
+    _validate_selection(selection)
+    return {
+        "default_eta_bins": 24,
+        "eta_range": (-MUON_ETA_MAX, MUON_ETA_MAX),
+        "mass_axis": hist.axis.Regular(80, MASS_MIN, MASS_MAX, name="mass"),
+        "mass_range": (MASS_MIN, MASS_MAX),
+    }
 
 
 def _validate_selection(selection):

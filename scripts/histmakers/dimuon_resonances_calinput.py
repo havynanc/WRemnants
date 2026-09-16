@@ -5,11 +5,7 @@ import numpy as np
 import ROOT
 
 import narf
-from wremnants.production import (
-    muon_calibration,
-    upsilon_trigger_selection,
-    upsilon_v_reweighting,
-)
+from wremnants.production import muon_calibration, v_reweighting
 from wremnants.production.histmaker_tools import write_analysis_output
 from wremnants.utilities import common, parsing
 from wums import logging
@@ -169,31 +165,31 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
-    "--upsilonTriggerSelection",
-    choices=upsilon_trigger_selection.SELECTIONS,
+    "--vReweightSelection",
     default=None,
     help=(
-        "Apply a trigger-motivated Upsilon selection. The inclusive_or choice "
-        "selects the HLT_Dimuon8_Upsilon_Barrel or HLT_Dimuon13_Upsilon OR. "
-        "The other choices retain mutually exclusive barrel and high-pT "
-        "categories routed by the requested geometry definition."
+        "Apply a trigger-motivated selection defining the categories of the "
+        "kinematic reweighting. The valid choices depend on the resonance: "
+        "jpsi has a single trivial 'inclusive' category, upsilon offers "
+        "inclusive_or plus three barrel/high-pT routings."
     ),
 )
 parser.add_argument(
-    "--makeUpsilonVReweightInputs",
+    "--makeVReweightInputs",
     action="store_true",
     help=(
         "Write a fine-binned (category, ptll, yll, cosThetaStarll) histogram "
-        "for deriving category-specific Upsilon kinematic weights. Requires "
-        "--upsilonTriggerSelection."
+        "for deriving category-specific kinematic weights. Requires "
+        "--vReweightSelection and a single --triggers channel."
     ),
 )
 parser.add_argument(
-    "--upsilonVReweightFile",
+    "--vReweightFile",
     default=None,
     help=(
-        "Apply category-specific Upsilon kinematic weights from this HDF5 "
-        "payload to simulation. Requires --upsilonTriggerSelection."
+        "Apply category-specific kinematic weights from this HDF5 payload to "
+        "simulation. Requires --vReweightSelection and a single --triggers "
+        "channel matching the one the payload was derived from."
     ),
 )
 parser.add_argument(
@@ -238,18 +234,21 @@ if sum([args.quantile4D, args.quantile5D, args.quantileMass]) > 1:
     raise ValueError(
         "--quantile4D, --quantile5D, and --quantileMass are mutually exclusive"
     )
-if args.upsilonTriggerSelection is not None and args.resonance != "upsilon":
-    raise ValueError("--upsilonTriggerSelection requires --resonance upsilon")
-if args.makeUpsilonVReweightInputs and args.upsilonTriggerSelection is None:
+selection_module = v_reweighting.selection_module(args.resonance)
+if (
+    args.vReweightSelection is not None
+    and args.vReweightSelection not in selection_module.SELECTIONS
+):
     raise ValueError(
-        "--makeUpsilonVReweightInputs requires --upsilonTriggerSelection"
+        f"--vReweightSelection must be one of {selection_module.SELECTIONS} "
+        f"for resonance {args.resonance}"
     )
-if args.upsilonVReweightFile is not None and args.upsilonTriggerSelection is None:
-    raise ValueError("--upsilonVReweightFile requires --upsilonTriggerSelection")
-if args.upsilonVReweightFile is not None and args.makeUpsilonVReweightInputs:
-    raise ValueError(
-        "--upsilonVReweightFile and --makeUpsilonVReweightInputs are mutually exclusive"
-    )
+if args.makeVReweightInputs and args.vReweightSelection is None:
+    raise ValueError("--makeVReweightInputs requires --vReweightSelection")
+if args.vReweightFile is not None and args.vReweightSelection is None:
+    raise ValueError("--vReweightFile requires --vReweightSelection")
+if args.vReweightFile is not None and args.makeVReweightInputs:
+    raise ValueError("--vReweightFile and --makeVReweightInputs are mutually exclusive")
 if args.etaBins is not None and not args.fitMuonScaleAndResolution:
     raise ValueError(
         "--etaBins currently requires --fitMuonScaleAndResolution so scale "
@@ -263,17 +262,29 @@ if not all(trig in possible_triggers for trig in selected_triggers):
         f"selected resonance ({possible_triggers} for resonance "
         f"{args.resonance}), or be None to use all valid triggers"
     )
+if (args.makeVReweightInputs or args.vReweightFile is not None) and len(
+    selected_triggers
+) != 1:
+    raise ValueError(
+        "The V-reweighting passes operate on one trigger channel at a time: "
+        f"pass --triggers with exactly one of {possible_triggers}. A single "
+        "correction file covers one resonance, selection and channel."
+    )
 
 logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 
-upsilon_v_reweight_helpers = None
-if args.upsilonVReweightFile is not None:
-    upsilon_v_reweight_helpers = upsilon_v_reweighting.make_helpers(
-        args.upsilonVReweightFile, args.upsilonTriggerSelection
+v_reweight_helpers = None
+if args.vReweightFile is not None:
+    v_reweight_helpers = v_reweighting.make_helpers(
+        args.vReweightFile,
+        args.resonance,
+        args.vReweightSelection,
+        selected_triggers[0],
     )
     logger.info(
-        f"Loaded Upsilon V weights for selection "
-        f"'{args.upsilonTriggerSelection}' from {args.upsilonVReweightFile}"
+        f"Loaded {args.resonance} V weights for selection "
+        f"'{args.vReweightSelection}' and channel '{selected_triggers[0]}' "
+        f"from {args.vReweightFile}"
     )
 
 
@@ -469,25 +480,8 @@ resonance_options = {
 }
 
 cfg = resonance_options[args.resonance]
-if args.upsilonTriggerSelection is not None:
-    cfg = {
-        **cfg,
-        "default_eta_bins": 24,
-        "eta_range": (
-            -upsilon_trigger_selection.MUON_ETA_MAX,
-            upsilon_trigger_selection.MUON_ETA_MAX,
-        ),
-        "mass_axis": hist.axis.Regular(
-            80,
-            upsilon_trigger_selection.MASS_MIN,
-            upsilon_trigger_selection.MASS_MAX,
-            name="mass",
-        ),
-        "mass_range": (
-            upsilon_trigger_selection.MASS_MIN,
-            upsilon_trigger_selection.MASS_MAX,
-        ),
-    }
+if args.vReweightSelection is not None:
+    cfg = {**cfg, **selection_module.cfg_overrides(args.vReweightSelection)}
 eta_bins = args.etaBins or cfg["default_eta_bins"]
 eta_min, eta_max = cfg["eta_range"]
 mass_axis = cfg["mass_axis"]
@@ -848,25 +842,28 @@ def build_graph(df, dataset):
         )
     df = df.Filter(bool_filter(channel["cut"]))
 
-    if args.upsilonTriggerSelection is not None:
-        df = upsilon_trigger_selection.define_columns(
-            df, reco_cols, args.upsilonTriggerSelection
+    if args.vReweightSelection is not None:
+        df = v_reweighting.define_kinematics(df, reco_cols)
+        df = selection_module.define_trigger_columns(
+            df, reco_cols, args.vReweightSelection
         )
-        df = df.Filter("upsilon_trigger_category >= 0")
-        if args.makeUpsilonVReweightInputs:
+        df = df.Define(
+            v_reweighting.CATEGORY_COLUMN,
+            selection_module.category_expression(args.vReweightSelection),
+        )
+        # The category axis carries no flow bins, so rejected events have to be
+        # dropped before any map lookup happens.
+        df = df.Filter(f"{v_reweighting.CATEGORY_COLUMN} >= 0")
+        if args.makeVReweightInputs:
             results.append(
-                upsilon_trigger_selection.book_v_reweight_input(
-                    df, args.upsilonTriggerSelection
-                )
+                v_reweighting.book_input(df, args.resonance, args.vReweightSelection)
             )
 
-    if not dataset.is_data and upsilon_v_reweight_helpers is not None:
-        correction_helper, usable_helper, _ = upsilon_v_reweight_helpers
-        df = upsilon_v_reweighting.define_weights(
-            df, correction_helper, usable_helper
-        )
+    if not dataset.is_data and v_reweight_helpers is not None:
+        correction_helper, usable_helper, _ = v_reweight_helpers
+        df = v_reweighting.define_weights(df, correction_helper, usable_helper)
         results.append(
-            upsilon_v_reweighting.book_coverage(df, args.upsilonTriggerSelection)
+            v_reweighting.book_coverage(df, args.resonance, args.vReweightSelection)
         )
     else:
         df = df.Define("analysis_weight", "weight")
@@ -1053,4 +1050,12 @@ if args.quantileMass:
     name_append.append("quantileMass")
 if args.deltaPhiSign != "all":
     name_append.append(f"deltaPhi_{args.deltaPhiSign}")
+if args.vReweightSelection is not None:
+    name_append.append(f"vrwSel_{args.vReweightSelection}")
+    # The selection alone may still run over several channels; only the
+    # reweighting passes are pinned to exactly one.
+    if len(selected_triggers) == 1:
+        name_append.append(f"vrwChan_{selected_triggers[0]}")
+if args.vReweightFile is not None:
+    name_append.append("vrw")
 write_analysis_output(resultdict, fout, args, name_append=name_append)
