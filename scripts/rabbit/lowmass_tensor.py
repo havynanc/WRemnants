@@ -310,7 +310,8 @@ def zero_inactive_cells(dummy_hist, active_cells, shape_axis="mass"):
 
 
 def make_active_background(template_hist, active_cells, shape_axis="mass"):
-    """Build a flat background only in populated kinematic cells."""
+    """Build a background flat in shape-axis density, only in populated
+    kinematic cells."""
     shape_axis_index = template_hist.axes.name.index(shape_axis)
     active_bins = np.expand_dims(active_cells, axis=shape_axis_index)
     shape_axis_obj = template_hist.axes[shape_axis]
@@ -352,7 +353,19 @@ def make_active_background(template_hist, active_cells, shape_axis="mass"):
         weight_shape[shape_axis_index] = shape_axis_obj.size
         shape_weights = shape_weights.reshape(weight_shape)
     else:
-        shape_weights = np.ones(shape_axis_obj.size, dtype=float)
+        # No physical metadata: the shape axis is already physical, so its own
+        # widths are the right weights. A constant value here would make the
+        # template flat in counts per bin rather than in density, and the
+        # background param models (AxisExpModel, ...) only scale the nominal
+        # multiplicatively -- they never reintroduce the width. On a
+        # variable-width mass axis that hands the fit a background peaked
+        # wherever the bins are narrowest, i.e. under the resonance.
+        shape_weights = np.asarray(shape_axis_obj.widths, dtype=float)
+        shape_weights = np.where(
+            np.isfinite(shape_weights) & (shape_weights > 0.0),
+            shape_weights,
+            0.0,
+        )
         weight_shape = [1] * len(template_hist.axes)
         weight_shape[shape_axis_index] = shape_axis_obj.size
         shape_weights = shape_weights.reshape(weight_shape)
@@ -812,7 +825,6 @@ for resultdict in jpsi_channels:
         hist_mc = project_to_axes_with_mass(hist_mc, projection_axes)
         hist_data = project_to_axes_with_mass(hist_data, projection_axes)
 
-    signal_active_cells = populated_cells(hist_mc, event_thresh=args.mcEventThresh)
     if args.dataEventThresh > 0:
         data_active_cells = populated_cells(
             hist_data, event_thresh=args.dataEventThresh
