@@ -255,6 +255,16 @@ parser.add_argument(
     action="store_true",
     help="Include manual scale variations in addition to reweights",
 )
+parser.add_argument(
+    "--noPionVars",
+    action="store_true",
+    help=(
+        "Construct the scale (and resolution) variations by modifying only the "
+        "kaon leg, leaving the pion at its nominal kinematics. Affects both the "
+        "ONNX reweight and the manual variations. Default: both daughters are "
+        "varied (current behavior)."
+    ),
+)
 parser = parsing.set_parser_default(parser, "theoryCorr", [])
 parser = parsing.set_parser_default(parser, "scale_A", 1.0)
 parser = parsing.set_parser_default(parser, "scale_e", 1.0)
@@ -599,12 +609,12 @@ ROOT.gInterpreter.Declare("""
         ScaleVariationsHelper(unsigned int n_eta_bins, double eta_min, double eta_max,
                               unsigned int n_scale_params,
                               double width_A, double width_e, double width_M,
-                              double mK, double mPi)
+                              double mK, double mPi, bool vary_pion = true)
           : n_eta_bins_(n_eta_bins), n_scale_params_(n_scale_params),
             nvars_(n_eta_bins * n_scale_params),
             eta_min_(eta_min), eta_max_(eta_max),
             width_A_(width_A), width_e_(width_e), width_M_(width_M),
-            mK_(mK), mPi_(mPi) {}
+            mK_(mK), mPi_(mPi), vary_pion_(vary_pion) {}
 
         int eta_bin(double eta) const {
             if (eta < eta_min_ || eta >= eta_max_) return -1;
@@ -643,7 +653,10 @@ ROOT.gInterpreter.Declare("""
             double d0_mass_nom, double mRK_nom, double mRpi_nom) const {
 
             const int biK = eta_bin(etaK);
-            const int biPi = eta_bin(etaPi);
+            // When vary_pion_ is false the pion is never assigned to a
+            // variation eta bin, so shifted_pt returns its nominal pt for
+            // every variation and only the kaon is modified.
+            const int biPi = vary_pion_ ? eta_bin(etaPi) : -1;
 
             const double coshK = std::cosh(etaK);
             const double coshPi = std::cosh(etaPi);
@@ -691,6 +704,7 @@ ROOT.gInterpreter.Declare("""
     private:
         unsigned int n_eta_bins_, n_scale_params_, nvars_;
         double eta_min_, eta_max_, width_A_, width_e_, width_M_, mK_, mPi_;
+        bool vary_pion_;
     };
 
     // Constant per-fill index vectors matching the (ivar, {down, up}) ordering above.
@@ -827,6 +841,7 @@ if build_manual_scale_variations:
         1e-4 * args.scale_M,
         M_K,
         M_PI,
+        not args.noPionVars,
     )
     manual_scale_axes = [_scale_var_axis, _updown_axis]
     logger.info(
@@ -1302,23 +1317,37 @@ def build_graph(df, dataset):
             reco_pt_pi = f"float({template_columns['pt_pi']})"
             gen_pt_K = "K_gen_match[0]"
             gen_pt_pi = "pi_gen_match[0]"
+
+        # Per-leg RVec initialiser for the reweight helpers. With --noPionVars
+        # only the kaon leg is included, so the ONNX scale/resolution helpers
+        # (which loop over the RVec legs) modify the kaon alone; the pion stays
+        # at its nominal kinematics. The gen-match Filter below still uses the
+        # raw pi_gen_match column, so the event selection is unchanged.
+        def leg_rvec(cpp_type, k_expr, pi_expr):
+            entries = [k_expr] if args.noPionVars else [k_expr, pi_expr]
+            return f"ROOT::VecOps::RVec<{cpp_type}>{{{', '.join(entries)}}}"
+
         df = (
             df.Define("nominal_weight", "weight")
             .Define(
                 "scale_recoEta",
-                "ROOT::VecOps::RVec<float>{"
-                f"float({template_columns['eta_K']}), "
-                f"float({template_columns['eta_pi']})}}",
+                leg_rvec(
+                    "float",
+                    f"float({template_columns['eta_K']})",
+                    f"float({template_columns['eta_pi']})",
+                ),
             )
             .Define(
                 "scale_recoPhi",
-                "ROOT::VecOps::RVec<float>{"
-                f"float({template_columns['phi_K']}), "
-                f"float({template_columns['phi_pi']})}}",
+                leg_rvec(
+                    "float",
+                    f"float({template_columns['phi_K']})",
+                    f"float({template_columns['phi_pi']})",
+                ),
             )
             .Define(
                 "scale_recoCharge",
-                "ROOT::VecOps::RVec<int>{int(K_charge0), int(pi_charge0)}",
+                leg_rvec("int", "int(K_charge0)", "int(pi_charge0)"),
             )
         )
         direct_truth_columns = {
@@ -1380,29 +1409,29 @@ def build_graph(df, dataset):
         df = (
             df.Define(
                 "scale_recoPt",
-                f"ROOT::VecOps::RVec<float>{{{reco_pt_K}, {reco_pt_pi}}}",
+                leg_rvec("float", reco_pt_K, reco_pt_pi),
             )
             .Define(
                 "scale_genPt",
-                f"ROOT::VecOps::RVec<float>{{{gen_pt_K}, {gen_pt_pi}}}",
+                leg_rvec("float", gen_pt_K, gen_pt_pi),
             )
             .Define(
                 "scale_genEta",
-                "ROOT::VecOps::RVec<float>{K_gen_match[1], pi_gen_match[1]}",
+                leg_rvec("float", "K_gen_match[1]", "pi_gen_match[1]"),
             )
             .Define(
                 "scale_genPhi",
-                "ROOT::VecOps::RVec<float>{K_gen_match[2], pi_gen_match[2]}",
+                leg_rvec("float", "K_gen_match[2]", "pi_gen_match[2]"),
             )
             .Define(
                 "scale_genCharge",
-                "ROOT::VecOps::RVec<int>{int(K_gen_match[3]), int(pi_gen_match[3])}",
+                leg_rvec("int", "int(K_gen_match[3])", "int(pi_gen_match[3])"),
             )
             .Define(
                 "scale_hasGenMatch",
-                "ROOT::VecOps::RVec<int>{int(K_gen_match[4]), int(pi_gen_match[4])}",
+                leg_rvec("int", "int(K_gen_match[4])", "int(pi_gen_match[4])"),
             )
-            .Define("scale_muon_source", "ROOT::VecOps::RVec<int>{443, 443}")
+            .Define("scale_muon_source", leg_rvec("int", "443", "443"))
             .Filter("K_gen_match[4] > 0.5 && pi_gen_match[4] > 0.5")
         )
 
