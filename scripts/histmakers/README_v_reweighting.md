@@ -101,6 +101,41 @@ axis leaves the bins below that threshold unreachable, so they remain at unit
 weight. This applies to the Upsilon `high` category, whose 13.5 GeV threshold is
 above the 8.5 GeV axis edge.
 
+## Kinematic diagnostics
+
+`--kinDiagnostics` writes three finely binned histograms of the variables the
+maps are built from:
+
+```text
+kinDiagnostics_ptll
+kinDiagnostics_yll
+kinDiagnostics_cosThetaStarll
+```
+
+Each carries the same leading `triggerCategory` axis as `vReweightInput` plus
+one kinematic axis, on exactly the binning the maps are derived on, so they line
+up bin for bin with the derivation input. For J/psi the category axis has a
+single bin; for Upsilon it splits barrel and high the same way the maps do, so
+consumers need no per-resonance branching. They are filled with the applied
+weight.
+
+Unlike `vReweightInput` the flag is not tied to `--vReweightSelection` or to a
+single channel, so it works on its own for a plain look at the spectra. Without
+a selection the category axis holds one catch-all bin labelled `all`:
+
+```bash
+python3 scripts/histmakers/dimuon_resonances_calinput.py \
+  --resonance jpsi --era 2016PostVFP --triggers dimuon20_jpsi \
+  --kinDiagnostics -j 16 -o OUTDIR
+```
+
+Because they can be booked in *both* passes, running with `--kinDiagnostics` in
+the derivation and again in the application gives a direct before/after check:
+the simulation histograms should move toward data in the second pass, while the
+data histograms stay identical. This is the in-job closure test that
+`vReweightInput` cannot provide, since it is mutually exclusive with
+`--vReweightFile`. The flag adds `kinDiag` to the output filename.
+
 ## A note on normalization
 
 The weights preserve the supported simulation yield exactly, but they do so in

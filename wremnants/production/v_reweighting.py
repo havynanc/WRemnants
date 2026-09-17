@@ -80,6 +80,8 @@ FINE_COSTHETA_STEP = 0.05
 
 AXIS_NAMES = ("triggerCategory", "ptll", "yll", "cosThetaStarll")
 INPUT_HIST_NAME = "vReweightInput"
+DIAGNOSTIC_HIST_PREFIX = "kinDiagnostics"
+FALLBACK_CATEGORY_LABELS = ("all",)
 COVERAGE_HIST_NAME = "vReweightCoverage"
 PAYLOAD_KEY = "v_reweighting"
 PAYLOAD_VERSION = 1
@@ -113,24 +115,15 @@ def category_labels(resonance, selection):
     return selection_module(resonance).category_labels(selection)
 
 
-def fine_axes(resonance, selection):
-    """Return the fine-binned derivation axes for *resonance*."""
+def fine_kinematic_axes(resonance):
+    """Return the fine-binned kinematic axes for *resonance*.
 
-    labels = category_labels(resonance, selection)
+    These are the axes the maps are derived on, shared with the standalone
+    diagnostic histograms so the two are directly comparable.
+    """
+
     pt_edges = _coarse_edges(resonance)["ptll"]
     return [
-        hist.axis.Integer(
-            0,
-            len(labels),
-            name="triggerCategory",
-            underflow=False,
-            overflow=False,
-            metadata={
-                "resonance": resonance,
-                "selection": selection,
-                "labels": labels,
-            },
-        ),
         hist.axis.Variable(
             _fine_edges(pt_edges[0], pt_edges[-1], FINE_PT_STEP[resonance]),
             name="ptll",
@@ -144,6 +137,39 @@ def fine_axes(resonance, selection):
             name="cosThetaStarll",
         ),
     ]
+
+
+def category_axis(resonance, selection):
+    """Return the category axis for *selection*.
+
+    A *selection* of ``None`` means no categories were defined, which happens
+    when the diagnostics are booked on their own; the axis is then a single
+    catch-all bin so that every consumer sees the same axis structure.
+    """
+
+    labels = (
+        FALLBACK_CATEGORY_LABELS
+        if selection is None
+        else category_labels(resonance, selection)
+    )
+    return hist.axis.Integer(
+        0,
+        len(labels),
+        name="triggerCategory",
+        underflow=False,
+        overflow=False,
+        metadata={
+            "resonance": resonance,
+            "selection": selection,
+            "labels": labels,
+        },
+    )
+
+
+def fine_axes(resonance, selection):
+    """Return the fine-binned derivation axes for *resonance*."""
+
+    return [category_axis(resonance, selection), *fine_kinematic_axes(resonance)]
 
 
 def _declare_cs_variables():
@@ -209,6 +235,29 @@ def book_input(df, resonance, selection, weight_column="weight"):
         fine_axes(resonance, selection),
         [CATEGORY_COLUMN, *KINEMATIC_COLUMNS, weight_column],
     )
+
+
+def book_kinematic_diagnostics(
+    df, resonance, selection, weight_column="analysis_weight"
+):
+    """Book one finely binned histogram per reweighting variable.
+
+    Each carries the same leading category axis as :func:`fine_axes`, so the
+    booking is identical for a single trivial J/psi category and for the Upsilon
+    barrel/high split. Unlike :func:`book_input` they are booked with the applied
+    weight and are not mutually exclusive with applying a map, so they can be
+    produced in either pass and compared directly.
+    """
+
+    category = category_axis(resonance, selection)
+    return [
+        df.HistoBoost(
+            f"{DIAGNOSTIC_HIST_PREFIX}_{axis.name}",
+            [category, axis],
+            [CATEGORY_COLUMN, column, weight_column],
+        )
+        for axis, column in zip(fine_kinematic_axes(resonance), KINEMATIC_COLUMNS)
+    ]
 
 
 def build_payload(data_hist, mc_hist, resonance, channel):

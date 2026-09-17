@@ -193,6 +193,18 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--kinDiagnostics",
+    action="store_true",
+    help=(
+        "Write finely binned histograms of the dimuon pT, rapidity and "
+        "cos(theta*), on the same axes the reweighting maps are derived on, "
+        "each with the same leading category axis. Filled with the applied "
+        "weight, so running it in both passes shows what a map did. Works "
+        "without --vReweightSelection, in which case the category axis holds a "
+        "single catch-all bin."
+    ),
+)
+parser.add_argument(
     "--resolutionPrefitUncertainty",
     type=float,
     default=0.3,
@@ -842,8 +854,10 @@ def build_graph(df, dataset):
         )
     df = df.Filter(bool_filter(channel["cut"]))
 
-    if args.vReweightSelection is not None:
+    if args.vReweightSelection is not None or args.kinDiagnostics:
         df = v_reweighting.define_kinematics(df, reco_cols)
+
+    if args.vReweightSelection is not None:
         df = selection_module.define_trigger_columns(
             df, reco_cols, args.vReweightSelection
         )
@@ -858,6 +872,10 @@ def build_graph(df, dataset):
             results.append(
                 v_reweighting.book_input(df, args.resonance, args.vReweightSelection)
             )
+    elif args.kinDiagnostics:
+        # No selection defines categories here, so everything kept by the
+        # channel cut goes into the single catch-all bin.
+        df = df.Define(v_reweighting.CATEGORY_COLUMN, "0")
 
     if not dataset.is_data and v_reweight_helpers is not None:
         correction_helper, usable_helper, _ = v_reweight_helpers
@@ -867,6 +885,13 @@ def build_graph(df, dataset):
         )
     else:
         df = df.Define("analysis_weight", "weight")
+
+    if args.kinDiagnostics:
+        results.extend(
+            v_reweighting.book_kinematic_diagnostics(
+                df, args.resonance, args.vReweightSelection
+            )
+        )
 
     df, hist_axes, calibration_cols = calibration_axes_and_cols(
         df,
@@ -1058,4 +1083,6 @@ if args.vReweightSelection is not None:
         name_append.append(f"vrwChan_{selected_triggers[0]}")
 if args.vReweightFile is not None:
     name_append.append("vrw")
+if args.kinDiagnostics:
+    name_append.append("kinDiag")
 write_analysis_output(resultdict, fout, args, name_append=name_append)
