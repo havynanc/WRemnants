@@ -788,13 +788,9 @@ template_axes = make_d0_template_axes(
 )
 d0_axes = list(template_axes)
 
-# Coordinate columns matching d0_axes, in the same order. In 5D mode the pion
-# analogues (pi_CVH_eta0, mRpi) are inserted before the D0 mass (shape) axis.
-# this looks to be broken after the merge with the new selection - come back to fix 5d mode later
-if args.pionTemplateAxes:
-    coord_cols = ["K_CVH_eta0", "mRK", "pi_CVH_eta0", "mRpi", "D0_mass"]
-else:
-    coord_cols = ["K_CVH_eta0", "mRK", "D0_mass"]
+# The coordinate columns matching d0_axes are built per dataset inside
+# build_graph via template_column_coords(), since they depend on the
+# (optionally layer-corrected) template_columns mapping.
 
 # Axes for the optional --kinDiagnostics histograms. mRK uses the wide mR axis;
 # mRpi gets its own ~12x-compressed axis (the K<->pi swap scales the reduced mass
@@ -918,7 +914,9 @@ def apply_layer_corrections(df, dataset, helper, correction_index_count, results
         "eta_pi": "pi_CVH_eta0",
         "phi_pi": "pi_CVH_phi0",
         "eta_template": "K_CVH_eta0",
+        "eta_pi_template": "pi_CVH_eta0",
         "mRK": "mRK",
+        "mRpi": "mRpi",
         "mass": "D0_mass",
     }
     if helper is None:
@@ -1007,9 +1005,13 @@ def apply_layer_corrections(df, dataset, helper, correction_index_count, results
             "mRK_layer",
             f"{M_K}*{M_K}*(pi_layer_p4.E()/K_layer_p4.E())/D0_mass_layer",
         )
+        .Define(
+            "mRpi_layer",
+            f"{M_PI}*{M_PI}*(K_layer_p4.E()/pi_layer_p4.E())/D0_mass_layer",
+        )
         .Filter(
             "std::isfinite(D0_mass_layer) && D0_mass_layer > 0.0 && "
-            "std::isfinite(mRK_layer)",
+            "std::isfinite(mRK_layer) && std::isfinite(mRpi_layer)",
             "finite corrected D0 observables",
         )
     )
@@ -1022,7 +1024,9 @@ def apply_layer_corrections(df, dataset, helper, correction_index_count, results
         "eta_pi": "pi_layer_eta",
         "phi_pi": "pi_layer_phi",
         "eta_template": "K_layer_eta",
+        "eta_pi_template": "pi_layer_eta",
         "mRK": "mRK_layer",
+        "mRpi": "mRpi_layer",
         "mass": "D0_mass_layer",
     }
 
@@ -1275,17 +1279,31 @@ def build_graph(df, dataset):
         df, dataset, layer_helper, layer_index_count, results
     )
 
+    # Coordinate columns matching d0_axes, in the same order. In 5D mode
+    # (--pionTemplateAxes) the pion analogues (etaPi, mRpi) are inserted before
+    # the D0 mass (shape) axis. Built from template_columns so the (optionally
+    # layer-corrected) column names are used consistently.
+    if args.pionTemplateAxes:
+        fill_coords = [
+            template_columns["eta_template"],
+            template_columns["mRK"],
+            template_columns["eta_pi_template"],
+            template_columns["mRpi"],
+            template_columns["mass"],
+        ]
+    else:
+        fill_coords = [
+            template_columns["eta_template"],
+            template_columns["mRK"],
+            template_columns["mass"],
+        ]
+
     if dataset.is_data:
         results.append(
             df.HistoBoost(
                 "hD0_data",
                 d0_axes,
-                [
-                    template_columns["eta_template"],
-                    template_columns["mRK"],
-                    template_columns["mass"],
-                    "weight",
-                ],
+                fill_coords + ["weight"],
             )
         )
     else:
@@ -1439,12 +1457,7 @@ def build_graph(df, dataset):
             df.HistoBoost(
                 "hD0_nom",
                 d0_axes,
-                [
-                    template_columns["eta_template"],
-                    template_columns["mRK"],
-                    template_columns["mass"],
-                    "weight",
-                ],
+                fill_coords + ["weight"],
             )
         )
 
@@ -1548,12 +1561,7 @@ def build_graph(df, dataset):
             df.HistoBoost(
                 "nominal_muonScaleSyst_responseWeights",
                 d0_axes,
-                [
-                    template_columns["eta_template"],
-                    template_columns["mRK"],
-                    template_columns["mass"],
-                    "nominal_muonScaleSyst_responseWeights_tensor",
-                ],
+                fill_coords + ["nominal_muonScaleSyst_responseWeights_tensor"],
                 tensor_axes=data_jpsi_crctn_unc_helper.tensor_axes,
                 storage=hist.storage.Double(),
             )
@@ -1592,15 +1600,15 @@ def build_graph(df, dataset):
             # D0 mass) are per-variation RVecs; etaK/etaPi are fixed per-event scalars.
             if args.pionTemplateAxes:
                 manual_coord_cols = [
-                    "K_CVH_eta0",
+                    template_columns["eta_template"],
                     "d0_scale_var_mRK",
-                    "pi_CVH_eta0",
+                    template_columns["eta_pi_template"],
                     "d0_scale_var_mRpi",
                     "d0_scale_var_mass",
                 ]
             else:
                 manual_coord_cols = [
-                    "K_CVH_eta0",
+                    template_columns["eta_template"],
                     "d0_scale_var_mRK",
                     "d0_scale_var_mass",
                 ]
@@ -1608,10 +1616,8 @@ def build_graph(df, dataset):
                 df.HistoBoost(
                     "nominal_muonScaleSyst_manual",
                     d0_axes + manual_scale_axes,
-                    [
-                        template_columns["eta_template"],
-                        "d0_scale_var_mRK",
-                        "d0_scale_var_mass",
+                    manual_coord_cols
+                    + [
                         "d0_scale_var_idx",
                         "d0_scale_updown",
                         "nominal_weight",
@@ -1624,11 +1630,7 @@ def build_graph(df, dataset):
             df,
             d0_axes,
             results,
-            [
-                template_columns["eta_template"],
-                template_columns["mRK"],
-                template_columns["mass"],
-            ],
+            fill_coords,
             smearing_uncertainty_helper,
             "scale",
             storage_type=hist.storage.Double(),
