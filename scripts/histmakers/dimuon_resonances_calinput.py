@@ -212,7 +212,8 @@ parser.add_argument(
     help=(
         "Write finely binned histograms of the dimuon pT, rapidity and "
         "cos(theta*), on the same axes the reweighting maps are derived on, "
-        "each with the same leading category axis. Filled with the applied "
+        "plus the leading and subleading muon pT, each with the same leading "
+        "category axis. Filled with the applied "
         "weight, so running it in both passes shows what a map did. Works "
         "without --vReweightSelection, in which case the category axis holds a "
         "single catch-all bin."

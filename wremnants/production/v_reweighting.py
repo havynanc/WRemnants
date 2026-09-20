@@ -78,6 +78,11 @@ FINE_PT_STEP = {"jpsi": 0.25, "upsilon": 0.5}
 FINE_RAPIDITY_STEP = 0.05
 FINE_COSTHETA_STEP = 0.05
 
+# Range of the single-muon pT diagnostics. No map is derived on these, so they
+# carry no coarse binning to be a subset of; they only have to span the per-muon
+# pT the selections can reach, binned like the dimuon pT of the same resonance.
+MUON_PT_RANGE = {"jpsi": (0.0, 30.0), "upsilon": (0.0, 60.0)}
+
 AXIS_NAMES = ("triggerCategory", "ptll", "yll", "cosThetaStarll")
 INPUT_HIST_NAME = "vReweightInput"
 DIAGNOSTIC_HIST_PREFIX = "kinDiagnostics"
@@ -90,6 +95,7 @@ _CS_VARIABLES_DECLARED = False
 
 CATEGORY_COLUMN = "vrw_category"
 KINEMATIC_COLUMNS = ("vrw_ptll", "vrw_yll", "vrw_costheta")
+MUON_PT_COLUMNS = ("vrw_ptlead", "vrw_ptsublead")
 
 
 def resonances():
@@ -136,6 +142,27 @@ def fine_kinematic_axes(resonance):
             _fine_edges(COSTHETA_EDGES[0], COSTHETA_EDGES[-1], FINE_COSTHETA_STEP),
             name="cosThetaStarll",
         ),
+    ]
+
+
+def fine_muon_pt_axes(resonance):
+    """Return the fine-binned leading and subleading muon pT axes.
+
+    Diagnostics only: these are deliberately kept out of
+    :func:`fine_kinematic_axes` so the axes the maps are derived on stay
+    unchanged.
+    """
+
+    if resonance not in MUON_PT_RANGE:
+        raise ValueError(
+            f"No muon pT diagnostic binning defined for resonance "
+            f"'{resonance}'; choose from {resonances()}"
+        )
+    low, high = MUON_PT_RANGE[resonance]
+    edges = _fine_edges(low, high, FINE_PT_STEP[resonance])
+    return [
+        hist.axis.Variable(edges, name="ptlead"),
+        hist.axis.Variable(edges, name="ptsublead"),
     ]
 
 
@@ -242,6 +269,10 @@ def book_kinematic_diagnostics(
 ):
     """Book one finely binned histogram per reweighting variable.
 
+    The leading and subleading muon pT are booked alongside them: the maps are
+    not derived on those, but the pT cuts the selections apply act on them, so
+    they are what shows whether a map moved events across a threshold.
+
     Each carries the same leading category axis as :func:`fine_axes`, so the
     booking is identical for a single trivial J/psi category and for the Upsilon
     barrel/high split. Unlike :func:`book_input` they are booked with the applied
@@ -250,13 +281,15 @@ def book_kinematic_diagnostics(
     """
 
     category = category_axis(resonance, selection)
+    axes = [*fine_kinematic_axes(resonance), *fine_muon_pt_axes(resonance)]
+    columns = [*KINEMATIC_COLUMNS, *MUON_PT_COLUMNS]
     return [
         df.HistoBoost(
             f"{DIAGNOSTIC_HIST_PREFIX}_{axis.name}",
             [category, axis],
             [CATEGORY_COLUMN, column, weight_column],
         )
-        for axis, column in zip(fine_kinematic_axes(resonance), KINEMATIC_COLUMNS)
+        for axis, column in zip(axes, columns)
     ]
 
 
