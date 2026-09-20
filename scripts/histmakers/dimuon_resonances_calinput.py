@@ -40,8 +40,11 @@ trigger_channels = {
             "layer_corrected": True,
         },
         {
+            # Vetoing Dimuon20 makes the two J/psi channels mutually exclusive,
+            # so their yields can be added without double counting.
             "label": "doublemu4_jpsitrk_displaced",
-            "cut": "HLT_DoubleMu4_JpsiTrk_Displaced",
+            "cut": "HLT_DoubleMu4_JpsiTrk_Displaced && (HLT_Dimuon20_Jpsi == 0)",
+            "muon_eta_max": 1.4,
             "mc": ["/scratch/submit/cms/emanca/BuToJpsiK_BMuonFilter_v2_BPH.root"],
             "layer_corrected": False,
         },
@@ -193,6 +196,17 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--muLeadPtCut",
+    type=float,
+    default=0.0,
+    help=(
+        "Minimum leading-muon pT in GeV, applied to every selected channel. "
+        "The default of 0 applies no cut. This is a low-level selection "
+        "change, so correction files derived under a different value do not "
+        "apply."
+    ),
+)
+parser.add_argument(
     "--kinDiagnostics",
     action="store_true",
     help=(
@@ -233,6 +247,8 @@ if args.etaBins is not None and args.etaBins <= 0:
     raise ValueError("--etaBins must be a positive integer")
 if args.ptBins is not None and args.ptBins <= 0:
     raise ValueError("--ptBins must be a positive integer")
+if args.muLeadPtCut < 0:
+    raise ValueError("--muLeadPtCut must not be negative")
 if args.minValidPixelHits < 1:
     raise ValueError("--minValidPixelHits must be at least 1")
 if args.resolutionPrefitUncertainty <= 0:
@@ -776,6 +792,30 @@ def reco_columns(channel):
     }
 
 
+def channel_selection(channel, cols):
+    """Return the full offline selection for *channel*.
+
+    The trigger requirement is a fixed branch expression, but the kinematic cuts
+    have to be built from *cols*: the two J/psi channels read different muon
+    columns depending on layer_corrected, and --applyAeMtoData rewrites the pt
+    and mass entries for data.
+    """
+
+    terms = [f"({channel['cut']})"]
+    if args.muLeadPtCut > 0:
+        terms.append(
+            f"std::max(double({cols['plus_pt']}), double({cols['minus_pt']})) "
+            f"> {args.muLeadPtCut}"
+        )
+    muon_eta_max = channel.get("muon_eta_max")
+    if muon_eta_max is not None:
+        terms.append(
+            f"std::fabs({cols['plus_eta']}) < {muon_eta_max} && "
+            f"std::fabs({cols['minus_eta']}) < {muon_eta_max}"
+        )
+    return " && ".join(terms)
+
+
 def reco_selection(cols):
     mass_min, mass_max = cfg["mass_range"]
     return (
@@ -852,7 +892,7 @@ def build_graph(df, dataset):
         df = df.Filter(
             "Jpsigen_mass > 0.0 && Muplusgen_pt > 0.0 && Muminusgen_pt > 0.0"
         )
-    df = df.Filter(bool_filter(channel["cut"]))
+    df = df.Filter(bool_filter(channel_selection(channel, reco_cols)))
 
     if args.vReweightSelection is not None or args.kinDiagnostics:
         df = v_reweighting.define_kinematics(df, reco_cols)
@@ -1075,6 +1115,8 @@ if args.quantileMass:
     name_append.append("quantileMass")
 if args.deltaPhiSign != "all":
     name_append.append(f"deltaPhi_{args.deltaPhiSign}")
+if args.muLeadPtCut > 0:
+    name_append.append(f"muLeadPt_{args.muLeadPtCut:g}")
 if args.vReweightSelection is not None:
     name_append.append(f"vrwSel_{args.vReweightSelection}")
     # The selection alone may still run over several channels; only the
