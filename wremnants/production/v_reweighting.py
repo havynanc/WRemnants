@@ -95,7 +95,7 @@ _CS_VARIABLES_DECLARED = False
 
 CATEGORY_COLUMN = "vrw_category"
 KINEMATIC_COLUMNS = ("vrw_ptll", "vrw_yll", "vrw_costheta")
-MUON_PT_COLUMNS = ("vrw_ptlead", "vrw_ptsublead")
+MUON_PT_COLUMNS = ("vrw_ptlead", "vrw_ptsublead", "vrw_ptplus", "vrw_ptminus")
 
 
 def resonances():
@@ -146,7 +146,12 @@ def fine_kinematic_axes(resonance):
 
 
 def fine_muon_pt_axes(resonance):
-    """Return the fine-binned leading and subleading muon pT axes.
+    """Return the fine-binned single-muon pT axes.
+
+    Both orderings are booked: pT-ordered (leading, subleading), which is what
+    the selections cut on, and charge-ordered (mu+, mu-), which is how the
+    calibration histogram bins its pt1/pt2 -- the two are not the same muon, so
+    neither substitutes for the other.
 
     Diagnostics only: these are deliberately kept out of
     :func:`fine_kinematic_axes` so the axes the maps are derived on stay
@@ -163,6 +168,8 @@ def fine_muon_pt_axes(resonance):
     return [
         hist.axis.Variable(edges, name="ptlead"),
         hist.axis.Variable(edges, name="ptsublead"),
+        hist.axis.Variable(edges, name="ptplus"),
+        hist.axis.Variable(edges, name="ptminus"),
     ]
 
 
@@ -244,6 +251,8 @@ def define_kinematics(df, columns):
             f"std::min(double({columns['plus_pt']}), "
             f"double({columns['minus_pt']}))",
         )
+        .Define("vrw_ptplus", f"double({columns['plus_pt']})")
+        .Define("vrw_ptminus", f"double({columns['minus_pt']})")
         .Define("vrw_ptll", "vrw_dimuon_mom4.pt()")
         .Define("vrw_yll", "vrw_dimuon_mom4.Rapidity()")
         .Define(
@@ -269,9 +278,11 @@ def book_kinematic_diagnostics(
 ):
     """Book one finely binned histogram per reweighting variable.
 
-    The leading and subleading muon pT are booked alongside them: the maps are
-    not derived on those, but the pT cuts the selections apply act on them, so
-    they are what shows whether a map moved events across a threshold.
+    The single-muon pT are booked alongside them in both orderings: the maps are
+    not derived on those, but the pT cuts the selections apply act on the
+    pT-ordered pair, so they are what shows whether a map moved events across a
+    threshold, while the charge-ordered pair is what the calibration histogram
+    bins in pt1/pt2.
 
     Each carries the same leading category axis as :func:`fine_axes`, so the
     booking is identical for a single trivial J/psi category and for the Upsilon

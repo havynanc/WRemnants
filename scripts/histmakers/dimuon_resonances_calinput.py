@@ -45,6 +45,8 @@ trigger_channels = {
             "label": "doublemu4_jpsitrk_displaced",
             "cut": "HLT_DoubleMu4_JpsiTrk_Displaced && (HLT_Dimuon20_Jpsi == 0)",
             "muon_eta_max": 1.4,
+            "muon_pt_min": 4.0,
+            "dimuon_pt_min": 6.9,
             "mc": ["/scratch/submit/cms/emanca/BuToJpsiK_BMuonFilter_v2_BPH.root"],
             "layer_corrected": False,
         },
@@ -212,7 +214,9 @@ parser.add_argument(
     help=(
         "Write finely binned histograms of the dimuon pT, rapidity and "
         "cos(theta*), on the same axes the reweighting maps are derived on, "
-        "plus the leading and subleading muon pT, each with the same leading "
+        "plus the single-muon pT in both orderings (leading/subleading, which "
+        "the selections cut on, and mu+/mu-, which the calibration histogram "
+        "bins in pt1/pt2), each with the same leading "
         "category axis. Filled with the applied "
         "weight, so running it in both passes shows what a map did. Works "
         "without --vReweightSelection, in which case the category axis holds a "
@@ -813,6 +817,26 @@ def channel_selection(channel, cols):
         terms.append(
             f"std::fabs({cols['plus_eta']}) < {muon_eta_max} && "
             f"std::fabs({cols['minus_eta']}) < {muon_eta_max}"
+        )
+    muon_pt_min = channel.get("muon_pt_min")
+    if muon_pt_min is not None:
+        terms.append(
+            f"{cols['plus_pt']} > {muon_pt_min} && "
+            f"{cols['minus_pt']} > {muon_pt_min}"
+        )
+    dimuon_pt_min = channel.get("dimuon_pt_min")
+    if dimuon_pt_min is not None:
+        # pT of the muon pair, built from the same columns the rest of the
+        # selection uses so that --applyAeMtoData and the layer-corrected
+        # variants are followed. The transverse sum needs no eta or mass, and
+        # this is the same quantity as the ptll the maps are derived on.
+        terms.append(
+            f"std::hypot("
+            f"{cols['plus_pt']} * std::cos({cols['plus_phi']}) + "
+            f"{cols['minus_pt']} * std::cos({cols['minus_phi']}), "
+            f"{cols['plus_pt']} * std::sin({cols['plus_phi']}) + "
+            f"{cols['minus_pt']} * std::sin({cols['minus_phi']})"
+            f") > {dimuon_pt_min}"
         )
     return " && ".join(terms)
 
