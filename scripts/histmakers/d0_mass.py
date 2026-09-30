@@ -2,10 +2,11 @@ import glob
 import os
 
 import hist
+import numpy as np
 import ROOT
 
 import narf
-from wremnants.production import muon_calibration
+from wremnants.production import muon_calibration, v_reweighting
 from wremnants.production.d0_axes import make_d0_template_axes
 from wremnants.production.histmaker_tools import write_analysis_output
 from wremnants.utilities import common, parsing
@@ -18,15 +19,14 @@ DEFAULT_DATA_LAYER_CORRECTION_FILE = os.path.join(
 parser, initargs = parsing.common_parser(analysis_label)
 parser.add_argument(
     "--dataFile",
-    default="/scratch/submit/cms/emanca/D0Data_LayerJacobian_v5",
+    default="/scratch/submit/cms/emanca/D0Hadded_20260918/data.root",
     help="Input ROOT file, glob, or directory for data",
 )
 parser.add_argument(
     "--mcFile",
     nargs="+",
     default=[
-        "/scratch/submit/cms/emanca/DStarTransientCVHTruth_v1",
-        "/scratch/submit/cms/emanca/DStarTransientCVHTruth_prod500M_v1",
+        "/scratch/submit/cms/emanca/D0Hadded_20260918/mc_all.root",
     ],
     help="One or more input ROOT files, globs, or directories for MC",
 )
@@ -67,7 +67,7 @@ parser.add_argument(
 parser.add_argument(
     "--mcSelection",
     choices=["truthMatched", "dataLike"],
-    default="truthMatched",
+    default="dataLike",
     help=(
         "MC candidate selection. 'truthMatched' uses directly matched D* chains with "
         "valid CVH refits and basic acceptance; 'dataLike' additionally requires the "
@@ -107,13 +107,43 @@ parser.add_argument(
     help="minimum required pt for K and pi",
 )
 parser.add_argument(
+    "--vReweightSelection",
+    default=None,
+    choices=v_reweighting.selection_module("d0").SELECTIONS,
+    help=(
+        "Selection defining the categories of the kinematic reweighting. The D0 "
+        "sample has no trigger, so there is a single trivial 'inclusive' category."
+    ),
+)
+parser.add_argument(
+    "--makeVReweightInputs",
+    action="store_true",
+    help=(
+        "Write the fine-binned (category, ptll, yll, cosThetaStarll) histogram of "
+        "the Kpi system that the kinematic weights are derived from. Requires "
+        "--vReweightSelection."
+    ),
+)
+parser.add_argument(
+    "--vReweightFile",
+    default=None,
+    help=(
+        "Apply Kpi kinematic weights from this HDF5 payload to simulation. "
+        "Requires --vReweightSelection."
+    ),
+)
+parser.add_argument(
     "--kinDiagnostics",
     action="store_true",
     help=(
-        "Save kinematic diagnostic histograms (MC only, filled after gen matching): "
-        "the gen and reco pt of the K and pi with their qopr = (reco qop)/(gen qop) "
-        "(qop = charge/(pt*cosh(eta))), and the analogous gen and reco mRK with their "
-        "ratio mRK_reco/mRK_gen."
+        "Save kinematic diagnostic histograms. Two families: the Kpi pT, "
+        "rapidity and cos(theta*) on the axes the reweighting maps are derived "
+        "on, for both data and simulation; and, for simulation only and filled "
+        "after gen matching, the gen and reco pt of the K and pi with their "
+        "qopr = (reco qop)/(gen qop) (qop = charge/(pt*cosh(eta))), and the "
+        "analogous gen and reco mRK with their ratio mRK_reco/mRK_gen. Filled "
+        "with the applied weight, so running it in both reweighting passes "
+        "shows what a map did."
     ),
 )
 parser.add_argument(
@@ -316,7 +346,40 @@ if args.muonScaleVariation not in ["onnxReweight", "smearingWeightsSplines"]:
         "or smearingWeightsSplines"
     )
 
+if args.makeVReweightInputs and args.vReweightSelection is None:
+    raise ValueError("--makeVReweightInputs requires --vReweightSelection")
+if args.vReweightFile is not None and args.vReweightSelection is None:
+    raise ValueError("--vReweightFile requires --vReweightSelection")
+if args.vReweightFile is not None and args.makeVReweightInputs:
+    raise ValueError("--vReweightFile and --makeVReweightInputs are mutually exclusive")
+
 logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
+
+# The D0 sample has no trigger channels; the payload's channel field is pinned so
+# a correction file can still be validated against the run that produced it.
+VRW_CHANNEL = "inclusive"
+
+vrw_selection_module = v_reweighting.selection_module("d0")
+
+if args.makeVReweightInputs and args.mcSelection != "dataLike":
+    logger.warning(
+        "Deriving D0 kinematic weights with --mcSelection %s. The truth-matched "
+        "MC selection is much looser than the data one (no Dst_pt > 5 GeV, no D0 "
+        "mass window, no deltaM window, no pis_dR cut), so the map would be a "
+        "ratio of two different phase spaces and would absorb the selection "
+        "difference. --mcSelection dataLike is strongly recommended.",
+        args.mcSelection,
+    )
+
+v_reweight_helpers = None
+if args.vReweightFile is not None:
+    v_reweight_helpers = v_reweighting.make_helpers(
+        args.vReweightFile, "d0", args.vReweightSelection, VRW_CHANNEL
+    )
+    logger.info(
+        f"Applying D0 kinematic weights for selection "
+        f"'{args.vReweightSelection}' from {args.vReweightFile}"
+    )
 
 # Daughter masses [GeV]. The D0 histmaker always uses the mass-aware energy-loss
 # term in the ONNX scale reweight (K mass for the K leg, pi mass for the pi leg),
@@ -1247,6 +1310,142 @@ def truth_matched_mc_selection():
     )
 
 
+# Range of the single-track pT diagnostics. Sized from the *selected* daughter
+# spectrum, not the raw one: after the Dst_pt > 5 GeV cut the leading daughter
+# has a median near 9 GeV and a 99.9th percentile near 83, so 0-80 keeps the
+# overflow below a per mille. The subleading daughter is far softer (median
+# ~2.5 GeV) but shares the axis so the two are directly comparable.
+DAUGHTER_PT_DIAG_RANGE = (0.0, 80.0)
+
+
+def book_reco_diagnostics(df, selection, template_columns, results,
+                          weight_column="analysis_weight"):
+    """Book the reconstruction-only kinematic diagnostics.
+
+    Everything here fills from a reco column alone, so it is booked once for
+    data and simulation alike, before the graph splits. The gen-level partners
+    and the gen/reco ratios stay behind the gen-match filter in the simulation
+    branch, where they belong; these are deliberately separated out so the
+    reco side has a data counterpart to compare against.
+
+    Everything --kinDiagnostics writes carries the leading category axis, even
+    where it is a single trivial bin as it is for D0, so that the structure is
+    the same for every resonance. The gen partners of the species-resolved
+    quantities carry it too, so the gen/reco pairs stay comparable.
+
+    The pT-ordered daughter pair is booked but not a charge-ordered one: charge
+    is not a species ordering here, since D0 -> K- pi+ and D0bar -> K+ pi-, so
+    each histogram would mix kaons and pions.
+
+    All of them read *template_columns*, so they follow the layer-corrected
+    variants when those are enabled.
+    """
+
+    low, high = DAUGHTER_PT_DIAG_RANGE
+    edges = np.round(
+        np.arange(low, high + 1e-4, v_reweighting.FINE_PT_STEP["d0"]), 8
+    )
+    category = v_reweighting.category_axis("d0", selection)
+    pt_k, pt_pi = template_columns["pt_K"], template_columns["pt_pi"]
+    df = df.Define(
+        "kindiag_ptlead", f"std::max(double({pt_k}), double({pt_pi}))"
+    ).Define("kindiag_ptsublead", f"std::min(double({pt_k}), double({pt_pi}))")
+    for name in ("ptlead", "ptsublead"):
+        results.append(
+            df.HistoBoost(
+                f"{v_reweighting.DIAGNOSTIC_HIST_PREFIX}_{name}",
+                [category, hist.axis.Variable(edges, name=name)],
+                [v_reweighting.CATEGORY_COLUMN, f"kindiag_{name}", weight_column],
+            )
+        )
+    for name, column, axis in (
+        ("K_reco_pt", template_columns["pt_K"], axis_diag_pt),
+        ("pi_reco_pt", template_columns["pt_pi"], axis_diag_pt),
+        ("K_reco_eta", template_columns["eta_K"], axis_diag_eta),
+        ("pi_reco_eta", template_columns["eta_pi"], axis_diag_eta),
+        ("mRK_reco", template_columns["mRK"], axis_diag_mRK),
+        ("mRpi_reco", template_columns["mRpi"], axis_diag_mRpi),
+    ):
+        results.append(
+            df.HistoBoost(
+                f"{v_reweighting.DIAGNOSTIC_HIST_PREFIX}_{name}",
+                [category, axis],
+                [v_reweighting.CATEGORY_COLUMN, column, weight_column],
+            )
+        )
+    return df
+
+
+def add_v_reweighting(df, dataset, template_columns, results):
+    """Define the Kpi reweighting columns and ``analysis_weight`` on *df*.
+
+    Must be called at the point the nominal histogram is filled, so that the
+    derivation input and the applied weight see exactly the same event set. Data
+    and simulation fill theirs at different points in the graph -- simulation
+    only after the gen-match filter -- so there are two call sites.
+
+    ``analysis_weight`` is defined on every path, including when no reweighting
+    is requested, so downstream fills can use it unconditionally.
+    """
+
+    if (
+        args.vReweightSelection is None
+        and args.vReweightFile is None
+        and not args.kinDiagnostics
+    ):
+        return df.Define("analysis_weight", "weight")
+
+    vrw_columns = {
+        "plus_pt": template_columns["pt_K"],
+        "plus_eta": template_columns["eta_K"],
+        "plus_phi": template_columns["phi_K"],
+        "minus_pt": template_columns["pt_pi"],
+        "minus_eta": template_columns["eta_pi"],
+        "minus_phi": template_columns["phi_pi"],
+    }
+    # The kaon takes the "plus" slot so cos(theta*) measures one fixed physical
+    # direction for every candidate rather than flipping between D0 and D0bar.
+    df = v_reweighting.define_kinematics(df, vrw_columns, masses=(M_K, M_PI))
+
+    if args.vReweightSelection is not None:
+        df = vrw_selection_module.define_trigger_columns(
+            df, vrw_columns, args.vReweightSelection
+        )
+        df = df.Define(
+            v_reweighting.CATEGORY_COLUMN,
+            vrw_selection_module.category_expression(args.vReweightSelection),
+        )
+        # The category axis carries no flow bins. D0's expression never rejects,
+        # but the filter keeps the contract explicit if categories are ever added.
+        df = df.Filter(f"{v_reweighting.CATEGORY_COLUMN} >= 0")
+        if args.makeVReweightInputs:
+            results.append(
+                v_reweighting.book_input(df, "d0", args.vReweightSelection)
+            )
+    else:
+        df = df.Define(v_reweighting.CATEGORY_COLUMN, "0")
+
+    if not dataset.is_data and v_reweight_helpers is not None:
+        correction_helper, usable_helper, _ = v_reweight_helpers
+        df = v_reweighting.define_weights(df, correction_helper, usable_helper)
+        results.append(
+            v_reweighting.book_coverage(df, "d0", args.vReweightSelection)
+        )
+    else:
+        df = df.Define("analysis_weight", "weight")
+
+    if args.kinDiagnostics:
+        results.extend(
+            v_reweighting.book_kinematic_diagnostics(
+                df, "d0", args.vReweightSelection
+            )
+        )
+        df = book_reco_diagnostics(
+            df, args.vReweightSelection, template_columns, results
+        )
+    return df
+
+
 def build_graph(df, dataset):
     logger.info(f"build graph for dataset: {dataset.name}")
 
@@ -1299,11 +1498,12 @@ def build_graph(df, dataset):
         ]
 
     if dataset.is_data:
+        df = add_v_reweighting(df, dataset, template_columns, results)
         results.append(
             df.HistoBoost(
                 "hD0_data",
                 d0_axes,
-                fill_coords + ["weight"],
+                fill_coords + ["analysis_weight"],
             )
         )
     else:
@@ -1346,8 +1546,7 @@ def build_graph(df, dataset):
             return f"ROOT::VecOps::RVec<{cpp_type}>{{{', '.join(entries)}}}"
 
         df = (
-            df.Define("nominal_weight", "weight")
-            .Define(
+            df.Define(
                 "scale_recoEta",
                 leg_rvec(
                     "float",
@@ -1453,11 +1652,17 @@ def build_graph(df, dataset):
             .Filter("K_gen_match[4] > 0.5 && pi_gen_match[4] > 0.5")
         )
 
+        # Only now, after the gen-match filter above, does the simulation event
+        # set match what hD0_nom is filled with. Deriving or applying the map any
+        # earlier would use a superset and break closure silently.
+        df = add_v_reweighting(df, dataset, template_columns, results)
+        df = df.Define("nominal_weight", "analysis_weight")
+
         results.append(
             df.HistoBoost(
                 "hD0_nom",
                 d0_axes,
-                fill_coords + ["weight"],
+                fill_coords + ["analysis_weight"],
             )
         )
 
@@ -1505,25 +1710,31 @@ def build_graph(df, dataset):
                 .Define("mRpi_gen", f"{M_PI}*{M_PI}*(K_E_gen/pi_E_gen)/D0_mass_gen")
                 .Define("mRpi_ratio", "mRpi / mRpi_gen")
             )
+            vrw_category_axis = v_reweighting.category_axis(
+                "d0", args.vReweightSelection
+            )
             for name, col, axis in [
-                ("hK_gen_pt", "K_gen_pt", axis_diag_pt),
-                ("hK_reco_pt", template_columns["pt_K"], axis_diag_pt),
-                ("hpi_gen_pt", "pi_gen_pt", axis_diag_pt),
-                ("hpi_reco_pt", template_columns["pt_pi"], axis_diag_pt),
-                ("hK_qopr", "K_qopr", axis_diag_qopr),
-                ("hpi_qopr", "pi_qopr", axis_diag_qopr),
-                ("hmRK_gen", "mRK_gen", axis_diag_mRK),
-                ("hmRK_reco", template_columns["mRK"], axis_diag_mRK),
-                ("hmRK_ratio", "mRK_ratio", axis_diag_mR_ratio),
-                ("hK_gen_eta", "K_gen_eta", axis_diag_eta),
-                ("hK_reco_eta", "K_CVH_eta0", axis_diag_eta),
-                ("hpi_gen_eta", "pi_gen_eta", axis_diag_eta),
-                ("hpi_reco_eta", "pi_CVH_eta0", axis_diag_eta),
-                ("hmRpi_gen", "mRpi_gen", axis_diag_mRpi),
-                ("hmRpi_reco", "mRpi", axis_diag_mRpi),
-                ("hmRpi_ratio", "mRpi_ratio", axis_diag_mR_ratio),
+                ("kinDiagnostics_K_gen_pt", "K_gen_pt", axis_diag_pt),
+                ("kinDiagnostics_pi_gen_pt", "pi_gen_pt", axis_diag_pt),
+                ("kinDiagnostics_K_qopr", "K_qopr", axis_diag_qopr),
+                ("kinDiagnostics_pi_qopr", "pi_qopr", axis_diag_qopr),
+                ("kinDiagnostics_mRK_gen", "mRK_gen", axis_diag_mRK),
+                ("kinDiagnostics_mRK_ratio", "mRK_ratio", axis_diag_mR_ratio),
+                ("kinDiagnostics_K_gen_eta", "K_gen_eta", axis_diag_eta),
+                ("kinDiagnostics_pi_gen_eta", "pi_gen_eta", axis_diag_eta),
+                ("kinDiagnostics_mRpi_gen", "mRpi_gen", axis_diag_mRpi),
+                ("kinDiagnostics_mRpi_ratio", "mRpi_ratio", axis_diag_mR_ratio),
             ]:
-                results.append(df.HistoBoost(name, [axis], [col, "weight"]))
+                # Same leading category axis as everything else --kinDiagnostics
+                # writes, so the gen histograms keep the same structure as the
+                # reco partners they are compared against.
+                results.append(
+                    df.HistoBoost(
+                        name,
+                        [vrw_category_axis, axis],
+                        [v_reweighting.CATEGORY_COLUMN, col, "analysis_weight"],
+                    )
+                )
 
         input_kinematics = [
             "scale_recoPt",
@@ -1645,4 +1856,16 @@ mc_tree = args.treeName if args.treeName is not None else args.mcTreeName
 resultdict = narf.build_and_run([datasets[0]], build_graph, event_tree=data_tree)
 resultdict.update(narf.build_and_run([datasets[1]], build_graph, event_tree=mc_tree))
 fout = f"{os.path.basename(__file__).replace('py', 'hdf5')}"
-write_analysis_output(resultdict, fout, args, name_append=[args.era])
+# Tag the reweighting passes so the derivation and application outputs, and a
+# diagnostics-only run, cannot collide on disk.
+name_append = [args.era]
+if args.vReweightSelection is not None:
+    name_append.append(f"vrwSel_{args.vReweightSelection}")
+    name_append.append(f"vrwChan_{VRW_CHANNEL}")
+if args.makeVReweightInputs:
+    name_append.append("vrwInputs")
+if args.vReweightFile is not None:
+    name_append.append("vrw")
+if args.kinDiagnostics:
+    name_append.append("kinDiag")
+write_analysis_output(resultdict, fout, args, name_append=name_append)

@@ -76,13 +76,28 @@ def category_expression(selection):
 def define_trigger_columns(df, columns, selection):
     """Define the trigger and geometry columns used by *selection*.
 
-    The dimuon kinematics are defined separately by the reweighting core; only
-    the HLT decisions and the barrel geometry are resonance specific.
+    The dimuon kinematics are defined separately by the reweighting core; the
+    HLT decisions, the barrel geometry and the per-muon pT thresholds are
+    resonance specific.
+
+    The leading/subleading muon pT are defined here because the ``high``
+    category cuts on them. They are deliberately not part of the reweighting
+    core, which defines only the three variables the maps are derived on.
     """
 
     _validate_selection(selection)
     return (
         df.Define(
+            "vrw_ptlead",
+            f"std::max(double({columns['plus_pt']}), "
+            f"double({columns['minus_pt']}))",
+        )
+        .Define(
+            "vrw_ptsublead",
+            f"std::min(double({columns['plus_pt']}), "
+            f"double({columns['minus_pt']}))",
+        )
+        .Define(
             "vrw_trigger_dimuon8",
             "bool(HLT_Dimuon8_Upsilon_Barrel != 0)",
         )

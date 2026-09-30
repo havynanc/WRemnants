@@ -62,6 +62,57 @@ trigger_channels = {
 }
 
 
+# Range of the single-muon pT diagnostics booked alongside the reweighting
+# variables. No map is derived on these, so they carry no coarse binning to be a
+# subset of; they only have to span the per-muon pT the selections can reach,
+# binned like the dimuon pT of the same resonance. They live here rather than in
+# v_reweighting because what counts as a useful single-body ordering is a
+# property of the final state, not of the reweighting.
+MUON_PT_DIAG_RANGE = {"jpsi": (0.0, 30.0), "upsilon": (0.0, 60.0)}
+
+
+def book_muon_pt_diagnostics(df, resonance, selection, cols,
+                             weight_column="analysis_weight"):
+    """Book the single-muon pT diagnostics for *resonance*.
+
+    Two orderings, because they are not the same muon: pT ordered (leading,
+    subleading), which is what the selections cut on, and charge ordered
+    (mu+, mu-), which is how the calibration histogram bins its pt1/pt2.
+
+    Carries the same leading category axis as the reweighting diagnostics, even
+    where it is a single trivial bin, so that every histogram --kinDiagnostics
+    writes has the same structure across resonances. For Upsilon the axis is not
+    trivial: it splits barrel from high exactly as the maps do.
+    """
+
+    low, high = MUON_PT_DIAG_RANGE[resonance]
+    edges = np.round(
+        np.arange(low, high + 1e-4, v_reweighting.FINE_PT_STEP[resonance]), 8
+    )
+    category = v_reweighting.category_axis(resonance, selection)
+    df = (
+        df.Define(
+            "kindiag_ptlead",
+            f"std::max(double({cols['plus_pt']}), double({cols['minus_pt']}))",
+        )
+        .Define(
+            "kindiag_ptsublead",
+            f"std::min(double({cols['plus_pt']}), double({cols['minus_pt']}))",
+        )
+        .Define("kindiag_ptplus", f"double({cols['plus_pt']})")
+        .Define("kindiag_ptminus", f"double({cols['minus_pt']})")
+    )
+    hists = [
+        df.HistoBoost(
+            f"{v_reweighting.DIAGNOSTIC_HIST_PREFIX}_{name}",
+            [category, hist.axis.Variable(edges, name=name)],
+            [v_reweighting.CATEGORY_COLUMN, f"kindiag_{name}", weight_column],
+        )
+        for name in ("ptlead", "ptsublead", "ptplus", "ptminus")
+    ]
+    return df, hists
+
+
 parser, initargs = parsing.common_parser(analysis_label)
 parser.add_argument(
     "--resonance",
@@ -957,6 +1008,10 @@ def build_graph(df, dataset):
                 df, args.resonance, args.vReweightSelection
             )
         )
+        df, muon_pt_diagnostics = book_muon_pt_diagnostics(
+            df, args.resonance, args.vReweightSelection, reco_cols
+        )
+        results.extend(muon_pt_diagnostics)
 
     df, hist_axes, calibration_cols = calibration_axes_and_cols(
         df,

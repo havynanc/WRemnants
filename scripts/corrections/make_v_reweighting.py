@@ -22,9 +22,19 @@ from wums import ioutils, logging
 logger = logging.child_logger(__name__)
 
 
+# Not every histmaker names its datasets after the resonance and channel. The D0
+# histmaker's names are consumed verbatim by scripts/rabbit/d0_tensor.py, so they
+# are recorded here rather than renamed at the source.
+DATASET_NAME_OVERRIDES = {
+    "d0": {"data": "D0_data", "simulation": "D0_mc"},
+}
+
+
 def dataset_names(resonance, channel):
     """Return the dataset names the histmaker writes for *channel*."""
 
+    if resonance in DATASET_NAME_OVERRIDES:
+        return dict(DATASET_NAME_OVERRIDES[resonance])
     return {
         "data": f"{resonance}_data_{channel}",
         "simulation": f"{resonance}_mc_{channel}",
@@ -103,6 +113,13 @@ def main():
         raise ValueError(
             f"Unknown selection '{args.selection}' for resonance "
             f"'{args.resonance}'; choose from {module.SELECTIONS}"
+        )
+    # The D0 dataset names do not encode the channel, so a typo here would not be
+    # caught by the name lookup below and would only surface as a confusing
+    # mismatch when the payload is applied.
+    if args.resonance == "d0" and args.channel != "inclusive":
+        raise ValueError(
+            "The D0 sample has a single channel; pass --channel inclusive"
         )
 
     data_hist, mc_hist = load_inputs(args.input, args.resonance, args.channel)

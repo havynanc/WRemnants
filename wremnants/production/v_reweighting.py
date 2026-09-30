@@ -11,10 +11,15 @@ import h5py
 import hist
 import numpy as np
 
-from wremnants.production import jpsi_trigger_selection, upsilon_trigger_selection
+from wremnants.production import (
+    d0_selection,
+    jpsi_trigger_selection,
+    upsilon_trigger_selection,
+)
 from wums import ioutils
 
 SELECTION_MODULES = {
+    "d0": d0_selection,
     "jpsi": jpsi_trigger_selection,
     "upsilon": upsilon_trigger_selection,
 }
@@ -47,6 +52,26 @@ RAPIDITY_EDGES = np.asarray(
 COSTHETA_EDGES = np.round(np.arange(-1.0, 1.0001, 0.1), 8)
 
 PT_EDGES = {
+    # Measured on the selected D0 sample, not the raw one: the Dst_pt > 5 GeV cut
+    # makes the spectrum much harder than the inclusive D0 production spectrum.
+    # Data medians at ~12 GeV with p90 ~30 and p99 ~67, so the axis has to reach
+    # 100 GeV to keep the overflow (which is left at unit weight) below a percent.
+    # The binning is deliberately coarse: the shared rapidity and cos(theta*) edges
+    # already cost 18 x 20 cells per pT bin, and the D0 data sample is far smaller
+    # than the dimuon ones.
+    "d0": np.round(
+        np.concatenate(
+            (
+                np.arange(0.0, 6.0, 6.0),
+                np.arange(6.0, 14.0, 1.0),
+                np.arange(14.0, 24.0, 2.0),
+                np.arange(24.0, 40.0, 4.0),
+                np.arange(40.0, 60.0, 10.0),
+                np.arange(60.0, 100.0001, 20.0),
+            )
+        ),
+        8,
+    ),
     "jpsi": np.round(
         np.concatenate(
             (
@@ -74,14 +99,9 @@ PT_EDGES = {
 # Step of the fine input axis each coarse pT binning is derived from. The coarse
 # edges must be a subset of the fine ones for the rebinning in _rebin to work;
 # this is checked once at import time rather than left implicit.
-FINE_PT_STEP = {"jpsi": 0.25, "upsilon": 0.5}
+FINE_PT_STEP = {"d0": 0.25, "jpsi": 0.25, "upsilon": 0.5}
 FINE_RAPIDITY_STEP = 0.05
 FINE_COSTHETA_STEP = 0.05
-
-# Range of the single-muon pT diagnostics. No map is derived on these, so they
-# carry no coarse binning to be a subset of; they only have to span the per-muon
-# pT the selections can reach, binned like the dimuon pT of the same resonance.
-MUON_PT_RANGE = {"jpsi": (0.0, 30.0), "upsilon": (0.0, 60.0)}
 
 AXIS_NAMES = ("triggerCategory", "ptll", "yll", "cosThetaStarll")
 INPUT_HIST_NAME = "vReweightInput"
@@ -91,11 +111,12 @@ COVERAGE_HIST_NAME = "vReweightCoverage"
 PAYLOAD_KEY = "v_reweighting"
 PAYLOAD_VERSION = 1
 
+MUON_MASS = 0.1056583755
+
 _CS_VARIABLES_DECLARED = False
 
 CATEGORY_COLUMN = "vrw_category"
 KINEMATIC_COLUMNS = ("vrw_ptll", "vrw_yll", "vrw_costheta")
-MUON_PT_COLUMNS = ("vrw_ptlead", "vrw_ptsublead", "vrw_ptplus", "vrw_ptminus")
 
 
 def resonances():
@@ -142,34 +163,6 @@ def fine_kinematic_axes(resonance):
             _fine_edges(COSTHETA_EDGES[0], COSTHETA_EDGES[-1], FINE_COSTHETA_STEP),
             name="cosThetaStarll",
         ),
-    ]
-
-
-def fine_muon_pt_axes(resonance):
-    """Return the fine-binned single-muon pT axes.
-
-    Both orderings are booked: pT-ordered (leading, subleading), which is what
-    the selections cut on, and charge-ordered (mu+, mu-), which is how the
-    calibration histogram bins its pt1/pt2 -- the two are not the same muon, so
-    neither substitutes for the other.
-
-    Diagnostics only: these are deliberately kept out of
-    :func:`fine_kinematic_axes` so the axes the maps are derived on stay
-    unchanged.
-    """
-
-    if resonance not in MUON_PT_RANGE:
-        raise ValueError(
-            f"No muon pT diagnostic binning defined for resonance "
-            f"'{resonance}'; choose from {resonances()}"
-        )
-    low, high = MUON_PT_RANGE[resonance]
-    edges = _fine_edges(low, high, FINE_PT_STEP[resonance])
-    return [
-        hist.axis.Variable(edges, name="ptlead"),
-        hist.axis.Variable(edges, name="ptsublead"),
-        hist.axis.Variable(edges, name="ptplus"),
-        hist.axis.Variable(edges, name="ptminus"),
     ]
 
 
@@ -222,42 +215,43 @@ def _declare_cs_variables():
     _CS_VARIABLES_DECLARED = True
 
 
-def define_kinematics(df, columns):
-    """Define the reconstructed dimuon kinematics used by the maps on *df*."""
+def define_kinematics(df, columns, masses=(MUON_MASS, MUON_MASS)):
+    """Define the reconstructed two-body kinematics the maps are built on.
+
+    *columns* names the two decay products under the ``plus_*``/``minus_*`` keys.
+    For a dimuon those are literally mu+ and mu-; for D0 -> K pi they are the
+    kaon (in the "plus" slot) and the pion, and *masses* carries the two rest
+    masses in the same order.
+
+    Only the three map variables are defined here. Single-track diagnostics are
+    the individual histmakers' business, since what counts as a useful ordering
+    depends on the final state: charge ordering is a species ordering for a
+    dimuon but not for D0 -> K pi.
+
+    The order of the two bodies is fixed rather than charge dependent, so
+    ``vrw_costheta`` measures the same physical direction for every candidate.
+    """
 
     _declare_cs_variables()
-    muon_mass = 0.1056583755
     return (
         df.Define(
-            "vrw_muplus_mom4",
+            "vrw_plus_mom4",
             "ROOT::Math::PtEtaPhiMVector("
             f"{columns['plus_pt']}, {columns['plus_eta']}, "
-            f"{columns['plus_phi']}, {muon_mass})",
+            f"{columns['plus_phi']}, {masses[0]})",
         )
         .Define(
-            "vrw_muminus_mom4",
+            "vrw_minus_mom4",
             "ROOT::Math::PtEtaPhiMVector("
             f"{columns['minus_pt']}, {columns['minus_eta']}, "
-            f"{columns['minus_phi']}, {muon_mass})",
+            f"{columns['minus_phi']}, {masses[1]})",
         )
-        .Define("vrw_dimuon_mom4", "vrw_muplus_mom4 + vrw_muminus_mom4")
-        .Define(
-            "vrw_ptlead",
-            f"std::max(double({columns['plus_pt']}), "
-            f"double({columns['minus_pt']}))",
-        )
-        .Define(
-            "vrw_ptsublead",
-            f"std::min(double({columns['plus_pt']}), "
-            f"double({columns['minus_pt']}))",
-        )
-        .Define("vrw_ptplus", f"double({columns['plus_pt']})")
-        .Define("vrw_ptminus", f"double({columns['minus_pt']})")
-        .Define("vrw_ptll", "vrw_dimuon_mom4.pt()")
-        .Define("vrw_yll", "vrw_dimuon_mom4.Rapidity()")
+        .Define("vrw_v_mom4", "vrw_plus_mom4 + vrw_minus_mom4")
+        .Define("vrw_ptll", "vrw_v_mom4.pt()")
+        .Define("vrw_yll", "vrw_v_mom4.Rapidity()")
         .Define(
             "vrw_cs",
-            "wrem::csSineCosThetaPhi(vrw_muplus_mom4, vrw_muminus_mom4)",
+            "wrem::csSineCosThetaPhi(vrw_plus_mom4, vrw_minus_mom4)",
         )
         .Define("vrw_costheta", "vrw_cs.costheta")
     )
@@ -278,11 +272,10 @@ def book_kinematic_diagnostics(
 ):
     """Book one finely binned histogram per reweighting variable.
 
-    The single-muon pT are booked alongside them in both orderings: the maps are
-    not derived on those, but the pT cuts the selections apply act on the
-    pT-ordered pair, so they are what shows whether a map moved events across a
-    threshold, while the charge-ordered pair is what the calibration histogram
-    bins in pt1/pt2.
+    These are the map variables only. Histmakers are free to book further
+    diagnostics of their own alongside these, on whatever the final state makes
+    useful; :func:`category_axis` is public so they can carry the same leading
+    axis.
 
     Each carries the same leading category axis as :func:`fine_axes`, so the
     booking is identical for a single trivial J/psi category and for the Upsilon
@@ -292,8 +285,8 @@ def book_kinematic_diagnostics(
     """
 
     category = category_axis(resonance, selection)
-    axes = [*fine_kinematic_axes(resonance), *fine_muon_pt_axes(resonance)]
-    columns = [*KINEMATIC_COLUMNS, *MUON_PT_COLUMNS]
+    axes = fine_kinematic_axes(resonance)
+    columns = KINEMATIC_COLUMNS
     return [
         df.HistoBoost(
             f"{DIAGNOSTIC_HIST_PREFIX}_{axis.name}",

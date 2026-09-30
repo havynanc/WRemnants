@@ -1,9 +1,16 @@
 # Trigger selections and kinematic V reweighting
 
-The calibration-input histmaker can apply trigger-motivated offline selections
+The calibration-input histmakers can apply trigger-motivated offline selections
 and direct, category-specific shape weights in `(ptll, yll, cosThetaStarll)`.
-The feature is opt-in and works for both J/psi and Upsilon; the existing default
+The feature is opt-in and covers three resonances: J/psi and Upsilon in
+`dimuon_resonances_calinput.py`, and D0 in `d0_mass.py`. The existing default
 selection and weights are unchanged.
+
+For D0 the reweighted system is the `K pi` pair rather than a dimuon, so the
+axis names read as dimuon-flavoured but mean the parent pT, the parent rapidity,
+and the Collins-Soper polar angle built from the two daughters with the kaon in
+the first slot. The axis names are shared deliberately: the payload then has the
+same shape for every resonance, and no consumer has to branch.
 
 ## Workflow
 
@@ -41,6 +48,38 @@ python3 scripts/histmakers/dimuon_resonances_calinput.py \
 The Upsilon workflow is identical with `--resonance upsilon --triggers inclusive`
 and one of the Upsilon selections, for example `--vReweightSelection muon_eta`.
 
+### D0
+
+D0 lives in a different histmaker and takes no `--triggers`; the channel is
+pinned to `inclusive` on both sides.
+
+```bash
+python3 scripts/histmakers/d0_mass.py --era 2016PostVFP --mcSelection dataLike \
+  --vReweightSelection inclusive --makeVReweightInputs --kinDiagnostics \
+  -j 16 -o OUTPUT
+
+python3 scripts/corrections/make_v_reweighting.py \
+  OUTPUT/d0_mass_2016PostVFP_vrwSel_inclusive_vrwChan_inclusive_vrwInputs_kinDiag.hdf5 \
+  d0_v_weights.hdf5 \
+  --resonance d0 --selection inclusive --channel inclusive
+
+python3 scripts/histmakers/d0_mass.py --era 2016PostVFP --mcSelection dataLike \
+  --vReweightSelection inclusive --vReweightFile d0_v_weights.hdf5 \
+  --kinDiagnostics -j 16 -o OUTPUT
+```
+
+**Use `--mcSelection dataLike` in both passes.** The map is a data/MC shape
+ratio, so the two sides have to occupy the same phase space, and the default
+`truthMatched` selection is much looser than the data one: it drops the D0 mass
+window, the deltaM window, the `Dst_pt > 5 GeV` cut and the `pis_dR_D0` cut.
+Deriving across that gap folds the selection difference into what is nominally a
+production weight. The histmaker warns but does not refuse.
+
+Unlike the dimuon histmaker, `d0_mass.py` names its datasets `D0_data` and
+`D0_mc` rather than after the resonance and channel, because those names are
+consumed verbatim by `scripts/rabbit/d0_tensor.py`. `make_v_reweighting.py`
+carries a small override table for this.
+
 The loader rejects a file whose recorded resonance, selection, channel, category
 labels, axes or binning do not match the requested run, so the two passes cannot
 silently disagree. The selection and channel are part of the output filename, so
@@ -54,6 +93,11 @@ Which category an event lands in is decided by offline geometry, not by which
 HLT path fired. The paths overlap heavily, so path membership would not
 partition the sample, and the trigger emulation in simulation does not reproduce
 the data menu closely enough to drive the assignment.
+
+**D0** has a single trivial `inclusive` category and, unlike the other two, no
+trigger at all: the D* ALCARECO trees carry no HLT information and the histmaker
+has no `--triggers` argument. The category axis exists purely so the payload
+shape is resonance independent.
 
 **J/psi** has a single trivial `inclusive` category. The J/psi channels already
 apply a hard HLT cut of their own, so the category axis exists only to give the
@@ -78,10 +122,25 @@ than reassigned; only `combined_geometry` partitions losslessly.
 
 The rapidity and cos(theta*) binnings are shared. The pT binning is per
 resonance, since the spectra differ: J/psi covers 0-60 GeV in 82 bins, Upsilon
-8.5-100 GeV in 61 bins. The coarse map edges must be a subset of the fine
+8.5-100 GeV in 61 bins, D0 0-100 GeV in 22 bins.
+
+The D0 binning is deliberately coarse, for two reasons. The shared rapidity and
+cos(theta*) edges already cost 18 x 20 cells per pT bin, and the D0 data sample
+is far smaller than either dimuon one, so a fine pT axis buys empty cells rather
+than resolution. Its range is set by the *selected* spectrum, not the inclusive
+one: the `Dst_pt > 5 GeV` requirement makes the selected D0 spectrum much harder
+than D0 production, with a data median near 12 GeV and a 99th percentile near
+67 GeV. An axis stopping at 20 GeV, which the raw spectrum would suggest, leaves
+about 21% of data in overflow at unit weight. The coarse map edges must be a subset of the fine
 derivation axis; this is checked at import time in `v_reweighting.py`.
 
 ## Weight definition and fallback
+
+`background_subtracted` is `False` for every resonance. That matters more for D0
+than for the dimuon resonances: the D0 mass window retains combinatorial
+background whose `(pT, y, cos theta*)` shape is absorbed into the weights along
+with the signal. Worth a sideband study before the D0 weights are used for
+anything beyond shape diagnostics.
 
 Weights are derived independently in every retained category as
 
@@ -103,14 +162,57 @@ above the 8.5 GeV axis edge.
 
 ## Kinematic diagnostics
 
-`--kinDiagnostics` writes three finely binned histograms of the variables the
-maps are built from:
+`--kinDiagnostics` is the single flag in both histmakers. It always writes the
+three variables the maps are built from:
 
 ```text
 kinDiagnostics_ptll
 kinDiagnostics_yll
 kinDiagnostics_cosThetaStarll
 ```
+
+Each histmaker then adds whatever further diagnostics its final state makes
+useful, under the same `kinDiagnostics_` prefix. These are deliberately *not* in
+`v_reweighting.py`: what counts as a useful single-body quantity is a property
+of the final state, not of the reweighting.
+
+**Every** histogram `--kinDiagnostics` writes carries the leading
+`triggerCategory` axis, including the histmaker-specific ones and including the
+cases where it is a single trivial bin (J/psi and D0). That keeps the structure
+identical across resonances, so a consumer needs no per-resonance or
+per-histogram branching, and it means the Upsilon barrel/high split is available
+on every diagnostic rather than only on the three map variables.
+
+`dimuon_resonances_calinput.py` adds the two single-muon pT orderings:
+
+```text
+kinDiagnostics_ptlead      kinDiagnostics_ptplus
+kinDiagnostics_ptsublead   kinDiagnostics_ptminus
+```
+
+No map is derived on these, so they show what a map did to a variable it was not
+fitted to. `ptlead`/`ptsublead` are pT ordered and are what a leading-pT
+selection acts on; `ptplus`/`ptminus` are charge ordered, which for a dimuon is
+also a species ordering.
+
+`d0_mass.py` adds the pT-ordered pair only:
+
+```text
+kinDiagnostics_ptlead      kinDiagnostics_ptsublead
+```
+
+and no charge-ordered pair, because for D0 -> K pi the charge ordering is not a
+species ordering (D0 -> K- pi+ and D0bar -> K+ pi-) so each histogram would mix
+kaons and pions. The species-resolved equivalents are `kinDiagnostics_K_reco_pt` and
+`kinDiagnostics_pi_reco_pt`. In simulation those come from the gen-vs-reco
+resolution family the same flag books (`kinDiagnostics_K_qopr`,
+`kinDiagnostics_mRK_ratio` and friends), which needs gen-level truth and so is
+simulation only; in data they are booked directly, on the same axis and with no
+category axis, so the two are directly comparable.
+
+The D0 daughter axis spans 0-80 GeV, sized from the *selected* spectrum: after
+the `Dst_pt > 5 GeV` cut the leading daughter has a median near 9 GeV and a
+99.9th percentile near 83.
 
 Each carries the same leading `triggerCategory` axis as `vReweightInput` plus
 one kinematic axis, on exactly the binning the maps are derived on, so they line
