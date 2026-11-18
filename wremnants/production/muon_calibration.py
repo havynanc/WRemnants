@@ -360,6 +360,7 @@ def make_muon_smearing_helpers(
     onnx_nslots=None,
     variation_eta_bins=None,
     cond_pt_gen_min=None,
+    fit_parameter_names=("a", "b", "c", "d"),
 ):
     is_onnx = scale_var_method == "onnxReweight"
     if is_onnx and onnx_path is None:
@@ -460,12 +461,20 @@ def make_muon_smearing_helpers(
     hnomwmc = hnomw[{"data_mc": "mc"}]
 
     if parameter_variations:
+        all_parameters = ("a", "b", "c", "d")
+        fit_parameter_names = tuple(fit_parameter_names)
+        if (
+            not fit_parameter_names
+            or len(set(fit_parameter_names)) != len(fit_parameter_names)
+            or not set(fit_parameter_names).issubset(all_parameters)
+        ):
+            raise ValueError(f"Invalid resolution parameter subset {fit_parameter_names}")
         axis_res_parm_variation = hist.axis.StrCategory(
-            ["a", "b", "c", "d"], name="res_parm_variation"
+            fit_parameter_names, name="res_parm_variation"
         )
         nvar = variation_eta_bins * axis_res_parm_variation.size
         dparms = np.zeros((neta, axis_res_parm.size, nvar), dtype=np.float64)
-        prefit_unc = dict(zip(axis_res_parm_variation, resolution_prefit_uncertainties))
+        prefit_unc = dict(zip(all_parameters, resolution_prefit_uncertainties))
         ivar = 0
         for ieta in range(neta):
             variation_ieta = ieta // eta_rebin_factor

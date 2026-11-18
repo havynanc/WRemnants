@@ -86,7 +86,7 @@ PT_EDGES = {
     "upsilon": np.round(
         np.concatenate(
             (
-                np.arange(8.5, 20.0, 0.5),
+                np.arange(upsilon_trigger_selection.DIMUON_PT_MIN, 20.0, 0.5),
                 np.arange(20.0, 40.0, 1.0),
                 np.arange(40.0, 60.0, 2.0),
                 np.arange(60.0, 100.1, 5.0),
@@ -166,12 +166,16 @@ def fine_kinematic_axes(resonance):
     ]
 
 
-def category_axis(resonance, selection):
+def category_axis(resonance, selection, *, stitching=None):
     """Return the category axis for *selection*.
 
     A *selection* of ``None`` means no categories were defined, which happens
     when the diagnostics are booked on their own; the axis is then a single
     catch-all bin so that every consumer sees the same axis structure.
+
+    *stitching* records the MC slice normalizations the simulation was weighted
+    with. It is only added to the metadata when set, so unstitched axes keep
+    the metadata of earlier payloads.
     """
 
     labels = (
@@ -179,24 +183,30 @@ def category_axis(resonance, selection):
         if selection is None
         else category_labels(resonance, selection)
     )
+    metadata = {
+        "resonance": resonance,
+        "selection": selection,
+        "labels": labels,
+    }
+    if stitching is not None:
+        metadata["stitching"] = stitching
     return hist.axis.Integer(
         0,
         len(labels),
         name="triggerCategory",
         underflow=False,
         overflow=False,
-        metadata={
-            "resonance": resonance,
-            "selection": selection,
-            "labels": labels,
-        },
+        metadata=metadata,
     )
 
 
-def fine_axes(resonance, selection):
+def fine_axes(resonance, selection, *, stitching=None):
     """Return the fine-binned derivation axes for *resonance*."""
 
-    return [category_axis(resonance, selection), *fine_kinematic_axes(resonance)]
+    return [
+        category_axis(resonance, selection, stitching=stitching),
+        *fine_kinematic_axes(resonance),
+    ]
 
 
 def _declare_cs_variables():
@@ -257,18 +267,18 @@ def define_kinematics(df, columns, masses=(MUON_MASS, MUON_MASS)):
     )
 
 
-def book_input(df, resonance, selection, weight_column="weight"):
+def book_input(df, resonance, selection, weight_column="weight", *, stitching=None):
     """Book the fine-binned input from which the maps are derived."""
 
     return df.HistoBoost(
         INPUT_HIST_NAME,
-        fine_axes(resonance, selection),
+        fine_axes(resonance, selection, stitching=stitching),
         [CATEGORY_COLUMN, *KINEMATIC_COLUMNS, weight_column],
     )
 
 
 def book_kinematic_diagnostics(
-    df, resonance, selection, weight_column="analysis_weight"
+    df, resonance, selection, weight_column="analysis_weight", *, stitching=None
 ):
     """Book one finely binned histogram per reweighting variable.
 
@@ -284,7 +294,7 @@ def book_kinematic_diagnostics(
     produced in either pass and compared directly.
     """
 
-    category = category_axis(resonance, selection)
+    category = category_axis(resonance, selection, stitching=stitching)
     axes = fine_kinematic_axes(resonance)
     columns = KINEMATIC_COLUMNS
     return [
@@ -370,8 +380,12 @@ def build_payload(data_hist, mc_hist, resonance, channel):
     }
 
 
-def load_payload(path, resonance, selection, channel):
-    """Load and validate a payload for *resonance*, *selection* and *channel*."""
+def load_payload(path, resonance, selection, channel, *, stitching=None):
+    """Load and validate a payload for *resonance*, *selection* and *channel*.
+
+    *stitching* is the MC normalization of the run the payload is applied in;
+    it has to match the one the map was derived with.
+    """
 
     with h5py.File(path, "r") as h5file:
         if PAYLOAD_KEY not in h5file:
@@ -381,16 +395,16 @@ def load_payload(path, resonance, selection, channel):
             value = payload.get(name)
             payload[name] = value.get() if hasattr(value, "get") else value
 
-    _validate_payload(payload, resonance, selection, channel)
+    _validate_payload(payload, resonance, selection, channel, stitching=stitching)
     return payload
 
 
-def make_helpers(path, resonance, selection, channel):
+def make_helpers(path, resonance, selection, channel, *, stitching=None):
     """Return validated correction and common-support lookup helpers."""
 
     from wremnants.production import correctionsTensor_helper
 
-    payload = load_payload(path, resonance, selection, channel)
+    payload = load_payload(path, resonance, selection, channel, stitching=stitching)
     return (
         correctionsTensor_helper.makeCorrectionsTensor(payload["correction"]),
         correctionsTensor_helper.makeCorrectionsTensor(payload["usable"]),
@@ -521,9 +535,11 @@ def _validate_inputs(data_hist, mc_hist, resonance):
             f"The inputs were produced for resonance '{metadata['resonance']}', "
             f"not '{resonance}'"
         )
+    if metadata != mc_hist.axes["triggerCategory"].metadata:
+        raise ValueError("Data and simulation category metadata differ")
 
 
-def _validate_payload(payload, resonance, selection, channel):
+def _validate_payload(payload, resonance, selection, channel, *, stitching=None):
     if not isinstance(payload, dict):
         raise ValueError("The V-reweighting payload is not a dictionary")
     if payload.get("version") != PAYLOAD_VERSION:
@@ -576,6 +592,10 @@ def _validate_payload(payload, resonance, selection, channel):
         or not np.array_equal(category.edges, np.arange(len(expected_labels) + 1))
     ):
         raise ValueError("The triggerCategory axis is inconsistent with the selection")
+    if metadata.get("stitching") != stitching:
+        raise ValueError(
+            "The V map was derived with a different MC stitching configuration"
+        )
     expected_edges = {**_coarse_edges(resonance), "vars": np.asarray([0.0, 1.0])}
     for axis_name, edges in expected_edges.items():
         if not np.array_equal(correction.axes[axis_name].edges, edges):

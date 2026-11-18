@@ -57,7 +57,7 @@ parser.add_argument(
 parser.add_argument(
     "--calinputHdf5",
     default=str(WREMNANTS_DIR / "dimuon_resonances_calinput_jpsi_2016PostVFP.hdf5"),
-    help="WRemnants calInput-style HDF5 file to use for the JPsi channel",
+    help="WRemnants calibration-input HDF5 file",
 )
 parser.add_argument(
     "--jpsiChannels",
@@ -65,6 +65,10 @@ parser.add_argument(
     choices=list(jpsi_channel_names.values()),
     default=list(jpsi_channel_names.values()),
     help="JPsi channels to add to the tensor",
+)
+parser.add_argument(
+    "--upsilonChannels", nargs="+", choices=("barrel", "high"),
+    help="Build a NanoV15 Upsilon tensor instead of J/psi, using the requested trigger categories.",
 )
 parser.add_argument(
     "--mcEventThresh",
@@ -216,6 +220,13 @@ if args.mcTailEventThresh < 0:
     raise ValueError("--mcTailEventThresh cannot be negative")
 if args.mcTailBins <= 0:
     raise ValueError("--mcTailBins must be a positive integer")
+if args.upsilonChannels:
+    if len(set(args.upsilonChannels)) != len(args.upsilonChannels):
+        parser.error("--upsilonChannels must not contain duplicates")
+    if (args.massOnly or args.projectAxes is not None or args.massRebin != 1
+            or args.massMin is not None or args.massMax is not None
+            or args.mcTailEventThresh or args.jpsiTailMorph):
+        parser.error("Upsilon uses the original 4+1D histogram axes and no tail selection or morph")
 
 
 def rebin_mass(dummy_hist, factor):
@@ -579,7 +590,7 @@ def load_jpsi_channels_from_calinput(path):
     return channels, input_meta_info
 
 
-def split_calinput_scale_variations(
+def iter_calinput_scale_variations(
     hsyst,
     hist_mc,
     scaling_factor,
@@ -589,9 +600,6 @@ def split_calinput_scale_variations(
     mass_min=None,
     mass_max=None,
 ):
-    up_variations = []
-    down_variations = []
-
     if "unc" not in hsyst.axes.name or "downUpVar" not in hsyst.axes.name:
         raise RuntimeError(
             "Expected WRemnants systematic histogram with 'unc' and 'downUpVar' axes"
@@ -606,9 +614,6 @@ def split_calinput_scale_variations(
             f"in the calinput systematic histogram, found {hsyst.axes['unc'].size}"
         )
     num_eta_bins = hsyst.axes["unc"].size // len(nuisance_categories)
-    variations = []
-    groups = []
-
     for param_index, nuisance_category in enumerate(nuisance_categories):
         for i in range(num_eta_bins):
             unc_index = i * len(nuisance_categories) + param_index
@@ -627,15 +632,19 @@ def split_calinput_scale_variations(
             down = scale_variation_around_nominal(
                 down, hist_mc, args.rescaleScaleAndResolution
             )
-            up_variations.append(trim_variations(clip_values(up, lim=args.clip), hist_mc, thresh))
-            down_variations.append(trim_variations(clip_values(down, lim=args.clip), hist_mc, thresh))
-            variations.append(f"{nuisance_category}{i}")
-            groups.append(nuisance_category)
+            yield (
+                trim_variations(clip_values(up, lim=args.clip), hist_mc, thresh),
+                trim_variations(clip_values(down, lim=args.clip), hist_mc, thresh),
+                f"{nuisance_category}{i}", nuisance_category,
+            )
 
-    return up_variations, down_variations, variations, groups
+
+def split_calinput_scale_variations(*args, **kwargs):
+    columns = tuple(map(list, zip(*iter_calinput_scale_variations(*args, **kwargs))))
+    return columns or ([], [], [], [])
 
 
-def split_calinput_resolution_variations(
+def iter_calinput_resolution_variations(
     hsyst,
     hist_mc,
     scaling_factor,
@@ -644,13 +653,13 @@ def split_calinput_resolution_variations(
     mass_rebin=1,
     mass_min=None,
     mass_max=None,
+    input_res_categories=("a", "b", "c", "d"),
 ):
     if "smearing_variation" not in hsyst.axes.name:
         raise RuntimeError(
             "Expected WRemnants resolution histogram with 'smearing_variation' axis"
         )
 
-    input_res_categories = ["a", "b", "c", "d"]
     output_res_categories = ["a", "b", "c"]
     if hsyst.axes["smearing_variation"].size % len(input_res_categories):
         raise RuntimeError(
@@ -659,9 +668,6 @@ def split_calinput_resolution_variations(
         )
     num_eta_bins = hsyst.axes["smearing_variation"].size // len(input_res_categories)
 
-    resolution_variations = []
-    resolution_names = []
-    resolution_groups = []
     for param_name in output_res_categories:
         param_index = input_res_categories.index(param_name)
         for ieta in range(num_eta_bins):
@@ -674,13 +680,15 @@ def split_calinput_resolution_variations(
             variation = scale_variation_around_nominal(
                 variation, hist_mc, args.rescaleScaleAndResolution
             )
-            resolution_variations.append(
-                trim_variations(clip_values(variation, lim=args.clip), hist_mc, thresh)
+            yield (
+                trim_variations(clip_values(variation, lim=args.clip), hist_mc, thresh),
+                f"res_{param_name}{ieta}", f"res_{param_name}",
             )
-            resolution_names.append(f"res_{param_name}{ieta}")
-            resolution_groups.append(f"res_{param_name}")
 
-    return resolution_variations, resolution_names, resolution_groups
+
+def split_calinput_resolution_variations(*args, **kwargs):
+    columns = tuple(map(list, zip(*iter_calinput_resolution_variations(*args, **kwargs))))
+    return columns or ([], [], [])
 
 
 def split_calinput_pixel_multiplicity_variations(
@@ -714,6 +722,115 @@ def split_calinput_pixel_multiplicity_variations(
         groups.append(name_prefix)
 
     return variations, names, groups
+
+
+def add_upsilon_channels(writer):
+    """Add the NanoV15 states and calibration responses to the shared writer.
+
+    Returns the input file's meta_info, which is propagated into the tensor as
+    meta_info_input like for J/psi.
+    """
+    states = ("Y1S", "Y2S", "Y3S")
+    category_axis = "triggerCategory"
+    expected_axes = (category_axis, "eta1", "eta2", "pt1", "pt2", "mass")
+    with h5py.File(args.calinputHdf5, "r") as stream:
+        inputs = base_io.load_results_h5py(stream)
+        try:
+            data = materialize(inputs["upsilon_data_inclusive"]["output"]["Y_data"])
+            mc = inputs["upsilon_mc_inclusive"]["output"]
+            inclusive = materialize(mc["Y_mc"])
+            signals = {state: materialize(mc[state]) for state in states}
+        except KeyError as exc:
+            raise ValueError("Expected a NanoV15 Upsilon calibration-input file") from exc
+        input_meta_info = materialize(inputs["meta_info"]) if "meta_info" in inputs else None
+
+        if tuple(data.axes.name) != expected_axes:
+            raise ValueError(f"Expected Upsilon axes {expected_axes}; found {data.axes.name}")
+        category_metadata = data.axes[category_axis].metadata
+        if not isinstance(category_metadata, dict) or tuple(category_metadata.get("labels", ())) != ("barrel", "high"):
+            raise ValueError("Upsilon tensor requires two trigger categories, barrel and high")
+        for source in (inclusive, *signals.values()):
+            if data.axes != source.axes or source.axes[category_axis].metadata != category_metadata:
+                raise ValueError("Upsilon data and simulation axes or trigger metadata differ")
+        if not np.allclose(
+            inclusive.values(flow=True),
+            sum(source.values(flow=True) for source in signals.values()), rtol=1e-8, atol=1e-10,
+        ):
+            raise ValueError("Upsilon state templates do not sum to the inclusive signal")
+
+        raw_mc = None
+        if category_metadata.get("stitching") is not None:
+            if "Y_mc_unweighted" not in mc:
+                raise ValueError("Stitched Upsilon inputs require raw MC counts for the occupancy cut")
+            raw_mc = materialize(mc["Y_mc_unweighted"])
+            if raw_mc.axes != data.axes or raw_mc.axes[category_axis].metadata != category_metadata:
+                raise ValueError("Unweighted Upsilon occupancy axes or trigger metadata differ")
+
+        contexts = {}
+        for channel in args.upsilonChannels:
+            select = {category_axis: category_metadata["labels"].index(channel)}
+            obs = data[select]
+            nominal = inclusive[select]
+            n_data = obs.values().sum()
+            n_mc = nominal.values().sum()
+            if not all(np.isfinite(n) and n > 0 for n in (n_data, n_mc)):
+                raise ValueError(f"{channel}: nonpositive or invalid regular-bin yield")
+            scale = n_data / n_mc
+            # Keep the validated unstitched threshold on rescaled MC yields.
+            # Cross-section-weighted inputs use selected event counts instead.
+            occupancy = raw_mc[select] if raw_mc is not None else nominal * scale
+            active = populated_cells(occupancy, event_thresh=args.mcEventThresh)
+            active &= populated_cells(nominal)
+            if args.dataEventThresh > 0:
+                active &= populated_cells(obs, event_thresh=args.dataEventThresh)
+            if not active.any():
+                raise ValueError(f"{channel}: no populated Upsilon fit cells")
+
+            writer.add_channel(obs.axes, channel)
+            templates = {}
+            for state, source in signals.items():
+                template = zero_inactive_cells(clip_values(source[select] * scale, lim=args.clip), active)
+                templates[state] = template
+                writer.add_process(template, f"{state}_{channel}", channel, signal=True)
+            background = make_active_background(obs, active)
+            writer.add_process(background, f"background_{channel}", channel,
+                               variances=np.zeros_like(background.values()))
+            writer.add_data(zero_inactive_cells(obs, active), channel)
+            contexts[channel] = (select, active, scale, templates)
+            print(f"Active {channel} cells: {active.sum()}/{active.size}; "
+                  f"MC threshold uses {'raw counts' if raw_mc is not None else 'rescaled yields'}")
+
+        nuisances = [("muonScaleSyst", ("unc", "downUpVar"), iter_calinput_scale_variations)]
+        if not args.skipMuonResolution:
+            nuisances.append(("muonResolutionSyst", ("smearing_variation",),
+                              iter_calinput_resolution_variations))
+        for state in states:
+            for family, axes, iterate in nuisances:
+                key = f"{state}_{family}_responseWeights"
+                if key not in mc:
+                    raise ValueError(f"Missing {key}; run the histmaker with --fitMuonScaleAndResolution")
+                response = materialize(mc[key])
+                if (tuple(response.axes.name) != (*expected_axes, *axes)
+                        or tuple(response.axes)[:len(expected_axes)] != tuple(data.axes)
+                        or response.axes[category_axis].metadata != category_metadata
+                        or response.axes[axes[0]].size != 3 * data.axes["eta1"].size):
+                    raise ValueError(f"Unexpected axes or variation ordering for {key}")
+                if family == "muonScaleSyst" and response.axes["downUpVar"].size != 2:
+                    raise ValueError(f"Expected down and up responses for {key}")
+                for channel, (select, active, scale, templates) in contexts.items():
+                    template = templates[state]
+                    options = {} if family == "muonScaleSyst" else {"input_res_categories": ("a", "b", "c")}
+                    for *varied, name, group in iterate(response[select], template, scale, 1e-5, **options):
+                        for variation in varied:
+                            zero_inactive_cells(variation, active)
+                        if all(np.array_equal(v.values(), template.values()) for v in varied):
+                            continue
+                        writer.add_systematic(
+                            varied if len(varied) == 2 else varied[0], name, f"{state}_{channel}", channel,
+                            groups=[group], constrained=True,
+                        )
+                del response
+    return input_meta_info
 
 
 # set up the global systematics
@@ -800,7 +917,13 @@ cov_data = np.array([])
 #                 constrained=True #should be True usually
 #             )
 
-jpsi_channels, input_meta_info = load_jpsi_channels_from_calinput(args.calinputHdf5)
+if args.upsilonChannels:
+    input_meta_info = add_upsilon_channels(writer)
+    jpsi_channels = []
+else:
+    jpsi_channels, input_meta_info = load_jpsi_channels_from_calinput(
+        args.calinputHdf5
+    )
 for resultdict in jpsi_channels:
     sample = resultdict["name"]
     if sample not in args.jpsiChannels:

@@ -22,11 +22,11 @@ CASES = [
 ]
 
 
-def make_inputs(resonance, selection, seed=1234, hole_fraction=0.3):
+def make_inputs(resonance, selection, seed=1234, hole_fraction=0.3, stitching=None):
     """Build a data/simulation input pair with a known pattern of holes."""
 
     rng = np.random.default_rng(seed)
-    axes = vrw.fine_axes(resonance, selection)
+    axes = vrw.fine_axes(resonance, selection, stitching=stitching)
     data = hist.Hist(*axes, storage=hist.storage.Weight())
     mc = data.copy()
 
@@ -203,6 +203,62 @@ def test_mismatched_payload_is_rejected(resonance, selection, channel):
     payload = vrw.build_payload(data, mc, "jpsi", "some_channel")
     with pytest.raises(ValueError):
         vrw._validate_payload(payload, resonance, selection, channel)
+
+
+STITCHING = {"pt0to8": 2.0e-3, "pt8to13": 4.0e-4, "pt13toInf": 5.0e-5}
+
+
+def test_unstitched_category_metadata_is_unchanged():
+    """Payloads made before stitching existed must stay loadable."""
+
+    metadata = vrw.category_axis("upsilon", "muon_eta").metadata
+    assert set(metadata) == {"resonance", "selection", "labels"}
+
+
+def test_stitched_payload_round_trips_through_hdf5(tmp_path):
+    import h5py
+
+    data, mc = make_inputs("upsilon", "muon_eta", stitching=STITCHING)
+    payload = vrw.build_payload(data, mc, "upsilon", "inclusive")
+
+    path = tmp_path / "weights.hdf5"
+    with h5py.File(path, "w") as h5file:
+        ioutils.pickle_dump_h5py(vrw.PAYLOAD_KEY, payload, h5file)
+
+    loaded = vrw.load_payload(
+        path, "upsilon", "muon_eta", "inclusive", stitching=STITCHING
+    )
+    assert loaded["correction"].axes["triggerCategory"].metadata["stitching"] == STITCHING
+
+
+@pytest.mark.parametrize(
+    "derived,applied",
+    [
+        (None, STITCHING),  # unstitched map on stitched simulation
+        (STITCHING, None),  # stitched map on unstitched simulation
+        (STITCHING, {**STITCHING, "pt0to8": 1.0e-3}),  # different factors
+    ],
+)
+def test_payload_with_other_stitching_is_rejected(derived, applied):
+    data, mc = make_inputs("upsilon", "muon_eta", stitching=derived)
+    payload = vrw.build_payload(data, mc, "upsilon", "inclusive")
+    with pytest.raises(ValueError, match="stitching"):
+        vrw._validate_payload(
+            payload, "upsilon", "muon_eta", "inclusive", stitching=applied
+        )
+
+
+def test_inputs_with_differing_category_metadata_are_rejected():
+    data, _ = make_inputs("upsilon", "muon_eta")
+    _, mc = make_inputs("upsilon", "muon_eta", stitching=STITCHING)
+    with pytest.raises(ValueError):
+        vrw.build_payload(data, mc, "upsilon", "inclusive")
+
+
+def test_upsilon_pt_axis_starts_at_the_selection_threshold():
+    from wremnants.production import upsilon_trigger_selection
+
+    assert vrw.PT_EDGES["upsilon"][0] == upsilon_trigger_selection.DIMUON_PT_MIN
 
 
 def test_category_without_common_support_is_rejected():

@@ -5,7 +5,12 @@ import numpy as np
 import ROOT
 
 import narf
-from wremnants.production import muon_calibration, v_reweighting
+from wremnants.production import (
+    muon_calibration,
+    sample_weights,
+    upsilon_nanov15,
+    v_reweighting,
+)
 from wremnants.production.histmaker_tools import write_analysis_output
 from wremnants.utilities import common, parsing
 from wums import logging
@@ -72,7 +77,7 @@ MUON_PT_DIAG_RANGE = {"jpsi": (0.0, 30.0), "upsilon": (0.0, 60.0)}
 
 
 def book_muon_pt_diagnostics(df, resonance, selection, cols,
-                             weight_column="analysis_weight"):
+                             weight_column="analysis_weight", *, stitching=None):
     """Book the single-muon pT diagnostics for *resonance*.
 
     Two orderings, because they are not the same muon: pT ordered (leading,
@@ -89,7 +94,7 @@ def book_muon_pt_diagnostics(df, resonance, selection, cols,
     edges = np.round(
         np.arange(low, high + 1e-4, v_reweighting.FINE_PT_STEP[resonance]), 8
     )
-    category = v_reweighting.category_axis(resonance, selection)
+    category = v_reweighting.category_axis(resonance, selection, stitching=stitching)
     df = (
         df.Define(
             "kindiag_ptlead",
@@ -126,6 +131,22 @@ parser.add_argument(
     nargs="+",
     default=None,
     help="Triggers to process for the resonance (each as a separate channel)",
+)
+parser.add_argument(
+    "--nanoVersion", choices=("v9", "v15"), default="v9",
+    help="Use the reduced input tree (v9) or the Upsilon NanoV15 Events tree.",
+)
+parser.add_argument(
+    "--nanoV15Inputs",
+    help="JSON with lists of ROOT files or directories for data, pt0to8, pt8to13 and pt13toInf.",
+)
+parser.add_argument(
+    "--stateAssignment", choices=("pdg", "legacy"),
+    help="Upsilon NanoV15 MC state definition: common ancestor (default) or generator dimuon mass.",
+)
+parser.add_argument(
+    "--upsilonStitchingFile",
+    help="Opt in to NanoV15 Upsilon MC stitching using a JSON of per-slice cross sections and generated sum of weights.",
 )
 parser.add_argument(
     "--etaBins",
@@ -298,6 +319,26 @@ parser = parsing.set_parser_default(parser, "scale_A", 5.0)
 parser = parsing.set_parser_default(parser, "scale_e", 5.0)
 
 args = parser.parse_args()
+nano_v15 = args.nanoVersion == "v15"
+if nano_v15:
+    if args.resonance != "upsilon" or args.era != "2016PostVFP":
+        parser.error("NanoV15 input is currently supported for Upsilon 2016PostVFP")
+    if args.nanoV15Inputs is None:
+        parser.error("--nanoVersion v15 requires --nanoV15Inputs")
+    if args.pixelMultiplicityStat or args.reweightPixelMultiplicity:
+        parser.error("the v9 pixel-multiplicity corrections do not apply to NanoV15")
+    if args.applyAeMtoData or args.quantile4D or args.quantile5D or args.quantileMass:
+        parser.error("NanoV15 uses native central refits and the fixed calibration axes")
+    args.stateAssignment = args.stateAssignment or "pdg"
+    args.vReweightSelection = args.vReweightSelection or "muon_eta"
+    if args.fitMuonScaleAndResolution and args.etaBins is None:
+        args.etaBins = 24
+    args.noSmearing = True
+    args.cvhBadModules = "none"
+elif args.nanoV15Inputs is not None or args.stateAssignment is not None:
+    parser.error("--nanoV15Inputs and --stateAssignment require --nanoVersion v15")
+if args.upsilonStitchingFile is not None and not nano_v15:
+    parser.error("--upsilonStitchingFile requires --nanoVersion v15")
 
 if args.etaBins is not None and args.etaBins <= 0:
     raise ValueError("--etaBins must be a positive integer")
@@ -357,6 +398,13 @@ if (args.makeVReweightInputs or args.vReweightFile is not None) and len(
 
 logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
 
+nano_inputs = upsilon_nanov15.load_inputs(args.nanoV15Inputs) if nano_v15 else None
+stitching = (
+    sample_weights.load_normalizations(args.upsilonStitchingFile, upsilon_nanov15.MC_SLICES)
+    if args.upsilonStitchingFile is not None else None
+)
+if stitching is not None:
+    logger.info("Upsilon MC stitching factors (pb per generator weight): %s", stitching)
 v_reweight_helpers = None
 if args.vReweightFile is not None:
     v_reweight_helpers = v_reweighting.make_helpers(
@@ -364,6 +412,7 @@ if args.vReweightFile is not None:
         args.resonance,
         args.vReweightSelection,
         selected_triggers[0],
+        stitching=stitching,
     )
     logger.info(
         f"Loaded {args.resonance} V weights for selection "
@@ -410,16 +459,17 @@ if args.muonScaleVariation not in ["onnxReweight", "smearingWeightsSplines"]:
     )
 
 calib_filepaths = common.calib_filepaths
+book_scale_response = not nano_v15 or args.fitMuonScaleAndResolution
 scale_diff_weights_helper = (
     ROOT.wrem.SplinesDifferentialWeightsHelper(calib_filepaths["tflite_file"])
-    if args.muonScaleVariation == "smearingWeightsSplines"
+    if book_scale_response and args.muonScaleVariation == "smearingWeightsSplines"
     else None
 )
 resolution_diff_weights_helper = (
     ROOT.wrem.SplinesDifferentialWeightsHelper(
         calib_filepaths["tflite_file_nosmearing"]
     )
-    if args.muonScaleVariation == "smearingWeightsSplines"
+    if book_scale_response and args.muonScaleVariation == "smearingWeightsSplines"
     else None
 )
 (
@@ -430,7 +480,9 @@ resolution_diff_weights_helper = (
 ) = muon_calibration.make_jpsi_crctn_helpers(
     calib_filepaths,
     muon_corr_mc=args.muonCorrMC,
-    muon_corr_data=args.muonCorrData,
+    # NanoV15 uses the native central refit. The massfit file supplies the
+    # eta grid for the zero-centered in-situ A/e/M response, not a correction.
+    muon_corr_data="massfit" if nano_v15 else args.muonCorrData,
     scale_var_method=args.muonScaleVariation,
     scale_A=args.scale_A,
     scale_e=args.scale_e,
@@ -447,16 +499,17 @@ resolution_diff_weights_helper = (
         if args.muonScaleVariation == "onnxReweight"
         else None
     ),
-)
+) if book_scale_response else (None, None, None, None)
 
-if data_jpsi_crctn_unc_helper is None:
+if book_scale_response and data_jpsi_crctn_unc_helper is None:
     raise ValueError(
         "Muon scale systematics require --muonCorrData massfit or lbl_massfit"
     )
 
+book_resolution_response = args.fitMuonScaleAndResolution if nano_v15 else not args.noSmearing
 _smearing_helper, smearing_uncertainty_helper = (
     (None, None)
-    if args.noSmearing
+    if not book_resolution_response
     else muon_calibration.make_muon_smearing_helpers(
         scale_var_method=args.muonScaleVariation,
         parameter_variations=True,
@@ -469,6 +522,8 @@ _smearing_helper, smearing_uncertainty_helper = (
             args.resolutionPrefitUncertainty,
         ],
         resolution_prefit_uncertainties_mode="relative",
+        smearing=not nano_v15,
+        fit_parameter_names=("a", "b", "c") if nano_v15 else ("a", "b", "c", "d"),
     )
 )
 
@@ -476,7 +531,7 @@ _smearing_helper, smearing_uncertainty_helper = (
     _pixel_multiplicity_helper,
     pixel_multiplicity_uncertainty_helper,
     pixel_multiplicity_uncertainty_helper_stat,
-) = muon_calibration.make_pixel_multiplicity_helpers()
+) = (None, None, None) if nano_v15 else muon_calibration.make_pixel_multiplicity_helpers()
 
 
 def limited_files(files):
@@ -497,17 +552,27 @@ for channel in trigger_channels[args.resonance]:
     for sample_type in ["data", "mc"]:
         dataset_name = f"{args.resonance}_{sample_type}_{channel['label']}"
         dataset_channels[dataset_name] = channel
+        is_data = sample_type == "data"
+        if nano_v15:
+            files = (
+                limited_files(nano_inputs["data"]) if is_data else
+                [path for name in upsilon_nanov15.MC_SLICES for path in limited_files(nano_inputs[name])]
+            )
+        else:
+            files = limited_files(
+                local_resonance_files[args.resonance]["data"] if is_data else channel["mc"]
+            )
         datasets.append(
             narf.Dataset(
                 name=dataset_name,
-                filepaths=limited_files(
-                    local_resonance_files[args.resonance]["data"]
-                    if sample_type == "data"
-                    else channel["mc"]
+                filepaths=files,
+                is_data=is_data,
+                xsec=None if is_data else 1.0,
+                lumi_json=(
+                    f"{common.data_dir}/Cert_271036-284044_13TeV_Legacy2016_Collisions16_JSON.txt"
+                    if nano_v15 and is_data else None
                 ),
-                is_data=sample_type == "data",
-                xsec=None if sample_type == "data" else 1.0,
-                group="Data" if sample_type == "data" else args.resonance.upper(),
+                group="Data" if is_data else args.resonance.upper(),
             )
         )
 
@@ -935,6 +1000,13 @@ def build_graph(df, dataset):
 
     results = []
     channel = dataset_channels[dataset.name]
+    if stitching is not None and not dataset.is_data:
+        df = sample_weights.define_normalized_weight(df, nano_inputs, stitching, "Events")
+    else:
+        df = df.DefinePerSample("weight", "1.0")
+    weightsum = df.SumAndCount("weight")
+    if nano_v15:
+        df = upsilon_nanov15.define_columns(df, dataset.is_data)
     reco_cols = reco_columns(channel)
 
     if dataset.is_data and AeM_corrections is not None:
@@ -957,9 +1029,6 @@ def build_graph(df, dataset):
         reco_cols["minus_pt"],
         reco_cols["mass"],
     ]
-
-    df = df.DefinePerSample("weight", "1.0")
-    weightsum = df.SumAndCount("weight")
 
     df = df.Filter(reco_selection(reco_cols))
     df = df.Filter(bool_filter(pixel_hit_selection()))
@@ -986,18 +1055,50 @@ def build_graph(df, dataset):
         df = df.Filter(f"{v_reweighting.CATEGORY_COLUMN} >= 0")
         if args.makeVReweightInputs:
             results.append(
-                v_reweighting.book_input(df, args.resonance, args.vReweightSelection)
+                v_reweighting.book_input(
+                    df, args.resonance, args.vReweightSelection, stitching=stitching
+                )
             )
     elif args.kinDiagnostics:
         # No selection defines categories here, so everything kept by the
         # channel cut goes into the single catch-all bin.
         df = df.Define(v_reweighting.CATEGORY_COLUMN, "0")
 
+    # The V-map input is booked before the state split, so it depends on
+    # selected dimuon kinematics rather than the MC labelling convention.
+    state_names = ("Y1S", "Y2S", "Y3S") if nano_v15 and not dataset.is_data else ()
+    if state_names:
+        if args.stateAssignment == "pdg":
+            df = upsilon_nanov15.define_ancestry(df)
+            results.append(
+                df.HistoBoost(
+                    "pdgAssignmentFailure",
+                    [v_reweighting.category_axis(args.resonance, args.vReweightSelection),
+                     hist.axis.Integer(0, 7, name="failure")],
+                    [v_reweighting.CATEGORY_COLUMN, "upsilon_pdg_failure"],
+                    storage=hist.storage.Int64(),
+                )
+            )
+            df = df.Define("upsilon_state", "upsilon_pdg_state").Filter(
+                "upsilon_state > 0", "common Upsilon ancestor assigned"
+            )
+        else:
+            df = df.Define(
+                "upsilon_state",
+                "Jpsigen_mass < 9.4609402 ? 1 : (Jpsigen_mass < 10.0237198 ? 2 : 3)",
+            )
+
     if not dataset.is_data and v_reweight_helpers is not None:
         correction_helper, usable_helper, _ = v_reweight_helpers
         df = v_reweighting.define_weights(df, correction_helper, usable_helper)
+        # Coverage counts selected events, independent of any MC stitching.
         results.append(
-            v_reweighting.book_coverage(df, args.resonance, args.vReweightSelection)
+            v_reweighting.book_coverage(
+                df,
+                args.resonance,
+                args.vReweightSelection,
+                weight_column="vrw_unit_weight",
+            )
         )
     else:
         df = df.Define("analysis_weight", "weight")
@@ -1005,11 +1106,12 @@ def build_graph(df, dataset):
     if args.kinDiagnostics:
         results.extend(
             v_reweighting.book_kinematic_diagnostics(
-                df, args.resonance, args.vReweightSelection
+                df, args.resonance, args.vReweightSelection, stitching=stitching
             )
         )
         df, muon_pt_diagnostics = book_muon_pt_diagnostics(
-            df, args.resonance, args.vReweightSelection, reco_cols
+            df, args.resonance, args.vReweightSelection, reco_cols,
+            stitching=stitching,
         )
         results.extend(muon_pt_diagnostics)
 
@@ -1019,6 +1121,11 @@ def build_graph(df, dataset):
         channel,
         reco_cols,
     )
+    if nano_v15:
+        hist_axes = [v_reweighting.category_axis(
+            args.resonance, args.vReweightSelection, stitching=stitching
+        ), *hist_axes]
+        calibration_cols = [v_reweighting.CATEGORY_COLUMN, *calibration_cols]
 
     pixel_multiplicity_cols = [
         "pixel_triggerCat",
@@ -1027,7 +1134,7 @@ def build_graph(df, dataset):
         "pixel_charge",
         "pixel_nvalidpixel",
     ]
-    if not dataset.is_data:
+    if not dataset.is_data and not nano_v15:
         df = (
             df
             # The calInput ntuples have no per-leg trigger matching; both selected
@@ -1059,8 +1166,23 @@ def build_graph(df, dataset):
             [*calibration_cols, "analysis_weight"],
         )
     )
+    if stitching is not None and not dataset.is_data:
+        # Count the same selected entries without physics weights for the
+        # tensor occupancy cut, including the usual mass-axis flow policy.
+        results.append(
+            df.HistoBoost("Y_mc_unweighted", hist_axes, calibration_cols,
+                          storage=hist.storage.Int64())
+        )
 
-    if not dataset.is_data:
+    for index, state in enumerate(state_names, start=1):
+        results.append(
+            df.Filter(f"upsilon_state == {index}").HistoBoost(
+                state, hist_axes, [*calibration_cols, "analysis_weight"],
+                storage=hist.storage.Weight(),
+            )
+        )
+
+    if not dataset.is_data and book_scale_response:
         df = (
             df.Define("nominal_weight", "analysis_weight")
             .Define(
@@ -1145,6 +1267,30 @@ def build_graph(df, dataset):
             response_weight_col="scale_resolution_response_weight",
         )
 
+        if nano_v15:
+            response_specs = (
+                ("muonScaleSyst", "nominal_muonScaleSyst_responseWeights_tensor",
+                 data_jpsi_crctn_unc_helper),
+                ("muonResolutionSyst", "muonResolutionSyst_weights",
+                 smearing_uncertainty_helper),
+            )
+            for index, state in enumerate(state_names, start=1):
+                state_df = df.Filter(f"upsilon_state == {index}")
+                reference = state_df.HistoBoost(
+                    f"{state}_response_nominalReference", hist_axes,
+                    [*calibration_cols, "nominal_weight"], storage=hist.storage.Double(),
+                )
+                results.append(reference)
+                for syst, column, helper in response_specs:
+                    results.append(
+                        state_df.HistoBoost(
+                            f"{state}_{syst}_responseWeights", hist_axes,
+                            [*calibration_cols, column], tensor_axes=helper.tensor_axes,
+                            storage=hist.storage.Double(),
+                        )
+                    )
+            return results, weightsum
+
         df = df.Define(
             "nominal_pixelMultiplicitySyst_tensor",
             pixel_multiplicity_uncertainty_helper,
@@ -1179,10 +1325,18 @@ def build_graph(df, dataset):
     return results, weightsum
 
 
-resultdict = narf.build_and_run(datasets, build_graph, event_tree="tree")
+resultdict = narf.build_and_run(
+    datasets, build_graph, event_tree="Events" if nano_v15 else "tree"
+)
+if nano_v15:
+    for result in resultdict.values():
+        if result["dataset"]["is_data"]:
+            result["lumi"] = 16.812  # Full 2016 post-VFP reference luminosity in fb^-1.
 
 fout = f"{os.path.basename(__file__).replace('py', 'hdf5')}"
 name_append = [args.resonance, args.era]
+if nano_v15:
+    name_append.extend(("v15", f"states_{args.stateAssignment}"))
 if args.etaBins is not None:
     name_append.append(f"etaBins_{args.etaBins}")
 if args.ptBins is not None:
@@ -1205,6 +1359,8 @@ if args.vReweightSelection is not None:
         name_append.append(f"vrwChan_{selected_triggers[0]}")
 if args.vReweightFile is not None:
     name_append.append("vrw")
+if stitching is not None:
+    name_append.append("upsilonStitched")
 if args.kinDiagnostics:
     name_append.append("kinDiag")
 write_analysis_output(resultdict, fout, args, name_append=name_append)

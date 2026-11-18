@@ -87,6 +87,77 @@ the weighted and unweighted passes do not collide. Data are never weighted. In
 simulation, the same kinematic weight multiplies the nominal and systematic
 histograms.
 
+### Upsilon from NanoV15
+
+For the Upsilon NanoV15 inputs, pass `--nanoVersion v15 --nanoV15Inputs
+inputs.json`. The JSON contains these four lists; use files or directories for
+the desired production:
+
+```json
+{
+  "data": ["/path/to/NanoV15/MuOnia"],
+  "pt0to8": ["/path/to/NanoV15/MC_Pt0to8"],
+  "pt8to13": ["/path/to/NanoV15/MC_Pt8to13"],
+  "pt13toInf": ["/path/to/NanoV15/MC_Pt13toInf"]
+}
+```
+
+Use the complete inventory. Directories are searched recursively; if two
+production tasks have the same output basename, keep both distinct full
+paths. The histmaker applies the 2016 post-VFP golden JSON to data and uses
+the stored CVH refit in data and ideal-CVH refit in simulation. It does not
+apply v9 nominal smearing or pixel-multiplicity corrections to NanoV15.
+
+With NanoV15, `--vReweightSelection` defaults to `muon_eta`, since the trigger
+category is also the leading axis of the calibration histograms; V weighting
+stays opt-in. The default state assignment is `pdg` (the nearest common
+Upsilon ancestor of the two matched muons). Use `--stateAssignment legacy` only
+for a generator-dimuon-mass comparison. The V-map input is made before the state
+split. To make the default NanoV15 calibration input, run from the repository
+root after `source setup.sh`:
+
+```bash
+nano=(--resonance upsilon --era 2016PostVFP --triggers inclusive
+      --nanoVersion v15 --nanoV15Inputs inputs.json)
+stem=dimuon_resonances_calinput_upsilon_2016PostVFP_v15_states_pdg
+
+python3 scripts/histmakers/dimuon_resonances_calinput.py \
+  "${nano[@]}" --makeVReweightInputs -j 16 -o CALINPUT
+python3 scripts/corrections/make_v_reweighting.py \
+  "CALINPUT/${stem}_vrwSel_muon_eta_vrwChan_inclusive.hdf5" \
+  CALINPUT/upsilon_v_weights.hdf5 \
+  --resonance upsilon --selection muon_eta --channel inclusive
+python3 scripts/histmakers/dimuon_resonances_calinput.py \
+  "${nano[@]}" --vReweightFile CALINPUT/upsilon_v_weights.hdf5 \
+  --fitMuonScaleAndResolution --etaBins 24 --scale_A 1 --scale_e 1 --scale_M 1 \
+  -j 16 -o CALINPUT
+```
+
+The last command books separate scale (`A`, `e`, `M`) and resolution (`a`,
+`b`, `c`) responses for each state. Use its HDF5 output for the
+[tensor and fit commands](../rabbit/README.md#nanov15-upsilon-fit).
+
+#### Optional MC slice stitching
+
+The default uses unit MC event weights before V weighting. To stitch the
+three generator slices by cross section, pass
+`--upsilonStitchingFile normalizations.json` both when making the V-map input
+and when applying the map in the response production. The JSON has one entry
+for each of `pt0to8`, `pt8to13`, and `pt13toInf`, with numeric
+`effective_xsec_pb` and `generated_sumw` fields. Supply the effective cross
+section after the generator filter and the generated sum of weights for that
+same production, before any reconstruction or analysis selection. Do not use
+the sum of selected weights or apply the generator filter efficiency twice.
+
+The histmaker multiplies MC `genWeight` by `effective_xsec_pb / generated_sumw`
+for each slice before deriving or applying the V weights. Data, selections,
+and input files are unchanged. The factors are recorded in the
+`triggerCategory` axis metadata, so a map derived with a different set of
+factors or without stitching cannot be used on stitched MC. Stitched output is
+named with `upsilonStitched` and includes `Y_mc_unweighted` for the tensor's MC
+occupancy cut. The tensor does not apply cross sections a second time. Use the
+produced `upsilonStitched` filenames in the V-map and tensor commands.
+
 ## Selections and categories
 
 Which category an event lands in is decided by offline geometry, not by which
@@ -108,13 +179,14 @@ path-based categories need their own study first.
 
 **Upsilon** offers four selections. `inclusive_or` retains one category
 requiring the Dimuon8-barrel or Dimuon13 HLT path and reconstructed dimuon pT
-above 8.5 GeV. The other choices make two exclusive categories. Their barrel
+above 8 GeV. The other choices make two exclusive categories. Their barrel
 route is selected using both-muon eta (`muon_eta`), dimuon rapidity
 (`dimuon_rapidity`), or their combination with the dimuon delta-eta requirement
 (`combined_geometry`). Barrel events must pass the Dimuon8-barrel path, its full
-offline geometry, and dimuon pT above 8.5 GeV. Remaining events must pass
-Dimuon13 and have dimuon, leading-muon, and subleading-muon pT above 13.5, 13.5,
-and 6.5 GeV, respectively. Under `muon_eta` and `dimuon_rapidity` an event that
+offline geometry, and dimuon pT above 8 GeV. Remaining events must pass
+Dimuon13 and have dimuon, leading-muon, and subleading-muon pT above 13, 13,
+and 6 GeV, respectively. These thresholds were lowered from 8.5, 13.5, 13.5 and
+6.5 GeV, so maps derived with the old ones have to be remade. Under `muon_eta` and `dimuon_rapidity` an event that
 satisfies the looser route but fails the full barrel geometry is rejected rather
 than reassigned; only `combined_geometry` partitions losslessly.
 
@@ -122,7 +194,7 @@ than reassigned; only `combined_geometry` partitions losslessly.
 
 The rapidity and cos(theta*) binnings are shared. The pT binning is per
 resonance, since the spectra differ: J/psi covers 0-60 GeV in 82 bins, Upsilon
-8.5-100 GeV in 61 bins, D0 0-100 GeV in 22 bins.
+8-100 GeV in 62 bins, D0 0-100 GeV in 22 bins.
 
 The D0 binning is deliberately coarse, for two reasons. The shared rapidity and
 cos(theta*) edges already cost 18 x 20 cells per pT bin, and the D0 data sample
@@ -157,8 +229,8 @@ summary for every category; weighted histmaker output also contains
 
 A category whose offline thresholds sit above the lower edge of the shared pT
 axis leaves the bins below that threshold unreachable, so they remain at unit
-weight. This applies to the Upsilon `high` category, whose 13.5 GeV threshold is
-above the 8.5 GeV axis edge.
+weight. This applies to the Upsilon `high` category, whose 13 GeV threshold is
+above the 8 GeV axis edge.
 
 ## Kinematic diagnostics
 

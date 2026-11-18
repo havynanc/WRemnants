@@ -20,3 +20,36 @@ python ./scripts/combine/setupRabbit.py -i mw_with_mu_eta_pt.hdf5 -o outputFolde
 ```
 
 Additional options are available to configure some systematics.
+
+## NanoV15 Upsilon fit
+
+In the normal WRemnants environment (`source setup.sh`), first make the
+V-weighted calibration histograms as described in the
+[Upsilon histmaker instructions](../histmakers/README_v_reweighting.md#upsilon-from-nanov15).
+Then build the sparse tensor and run the fixed-mass 4+1D fit:
+
+```bash
+stem=dimuon_resonances_calinput_upsilon_2016PostVFP_v15_states_pdg
+calinput="CALINPUT/${stem}_etaBins_24_vrwSel_muon_eta_vrwChan_inclusive_vrw.hdf5"
+
+python3 scripts/rabbit/lowmass_tensor.py \
+  --calinputHdf5 "$calinput" --upsilonChannels barrel high \
+  --sparse --mcEventThresh 500 -o TENSORS --outname upsilon_trigger_sparse.hdf5
+
+bash scripts/rabbit/run_upsilon_nanov15_fit.sh \
+  TENSORS/upsilon_trigger_sparse.hdf5 FIT_RESULTS
+```
+
+The fit uses independent 1S, 2S, and 3S normalizations, and an exponential
+background amplitude and slope in each occupied `eta1,eta2,pt1,pt2` cell of
+each trigger channel. The `A/e/M` and `a/b/c` nuisance parameters are shared
+across states and channels; each state and channel supplies its own response.
+Upsilon peak masses are fixed. The barrel and high predictions and their
+sum are saved as mass, eta, and pT projections. The sum is a derived output,
+not a third fitted channel.
+
+The builder shape-normalizes the MC to data once per trigger channel before
+masking cells. For unstitched MC, `--mcEventThresh` uses the rescaled MC yield,
+as in the validated Upsilon setup; with opt-in stitching it uses the raw
+MC occupancy histogram written by the histmaker. The same mask applies to
+data, all signals, background, and response variations.
